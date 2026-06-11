@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Hermes Monitor</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+
+<div id="app">
+
+  <!-- Header -->
+  <header id="header">
+    <div class="logo">
+      <span class="logo-emoji">🪽</span>
+      <span>Hermes Monitor</span>
+    </div>
+    <div class="header-status" id="header-status">
+      <span id="navbar-time" class="navbar-time">—</span>
+      <span id="navbar-connection" class="navbar-connection state-unknown" title="Monitor connection state">
+        <span class="state-dot"></span>
+        <span id="navbar-connection-label">?</span>
+      </span>
+    </div>
+    <div class="kanban-pills" id="kanban-pills">
+      <span class="pill pill-ready"   title="ready / todo / triage">— ready</span>
+      <span class="pill pill-running" title="running">— running</span>
+      <span class="pill pill-blocked" title="blocked / scheduled">— blocked</span>
+      <span class="pill pill-done"    title="done (lifetime)">— done</span>
+    </div>
+  </header>
+
+  <!-- Left sidebar: agents + files + backup -->
+  <aside id="left-sidebar">
+
+    <!-- Agents panel -->
+    <div id="agents">
+      <div class="panel-title">Agents</div>
+      <div id="agent-cards"></div>
+    </div>
+
+    <!-- Files panel -->
+    <div id="files-panel">
+      <div class="panel-title files-title">
+        <span>Generated Files</span>
+        <span id="files-count" class="files-count">0</span>
+      </div>
+      <div id="files-list">
+        <div class="files-empty" id="files-empty">No files yet</div>
+      </div>
+    </div>
+
+    <!-- Backup panel (sf_agents git — not hermes backup zip) -->
+    <div id="backup-panel">
+      <div class="panel-title backup-title">
+        <span>Config backup</span>
+        <span id="backup-dirty-badge" class="backup-dirty-badge" style="display:none" title="Uncommitted changes in the backup repo">uncommitted</span>
+      </div>
+      <div class="backup-repo" id="backup-repo" title=""></div>
+      <div id="backup-info">
+        <div class="backup-commit" id="backup-commit">Not configured</div>
+        <div class="backup-date" id="backup-date"></div>
+      </div>
+      <button class="btn btn-small btn-backup" id="btn-backup" onclick="runBackup()" title="Run backup.sh: ~/.hermes → sf_agents git commit">↑ Backup Now</button>
+      <div class="backup-hint">Full home zip: <code>hermes backup</code> in Terminal</div>
+      <div id="backup-output" class="backup-output" style="display:none"></div>
+    </div>
+
+  </aside>
+
+  <!-- Center: Kanban board + Activity feed -->
+  <main id="center">
+
+    <!-- System Health panel — front and center, issues push immediately -->
+    <section id="health-panel" class="health-clean">
+      <div class="health-bar" id="health-bar">
+        <span class="health-ok-icon">✅</span>
+        <span class="health-ok-text">All systems healthy</span>
+        <span class="health-issue-count" id="health-issue-count" style="display:none"></span>
+      </div>
+      <div id="health-issues" class="health-issues" style="display:none"></div>
+    </section>
+
+    <!-- Kanban board: ready · running · done -->
+    <section id="kanban">
+      <div class="panel-title kanban-header">
+        <span>Kanban — agent-to-agent trace</span>
+        <span class="kanban-hint">click a card for the full handoff</span>
+      </div>
+      <div class="kanban-cols">
+        <div class="kanban-col" data-status="active">
+          <div class="kanban-col-title">Ready / Running / Blocked</div>
+          <div class="kanban-col-list" id="kanban-active">
+            <div class="kanban-empty">No active cards</div>
+          </div>
+        </div>
+        <div class="kanban-col" data-status="done">
+          <div class="kanban-col-title">
+            <span>Recently done</span>
+            <button class="btn-archive-done" onclick="archiveAllDone()"
+                    title="Archive all done cards — they disappear from the board but stay in kanban.db">
+              archive all
+            </button>
+          </div>
+          <div class="kanban-col-list" id="kanban-done">
+            <div class="kanban-empty">No completed cards</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Activity feed -->
+    <section id="feed">
+      <div class="feed-header">
+        <span class="feed-title">Activity Feed</span>
+        <div class="feed-controls">
+          <span class="feed-count" id="feed-count">0 events</span>
+          <select id="feed-filter" class="feed-filter" onchange="setFeedFilter(this.value)" title="Filter activity feed">
+            <option value="all">All</option>
+            <option value="model">Model</option>
+            <option value="memory">Memory</option>
+            <option value="tools">Tools</option>
+            <option value="kanban">Kanban</option>
+            <option value="errors">Errors</option>
+          </select>
+          <button class="btn btn-small" onclick="clearFeed()">Clear</button>
+        </div>
+      </div>
+      <div id="feed-list">
+        <div class="feed-empty" id="feed-empty">
+          <div class="feed-empty-icon">📡</div>
+          <div>Waiting for agent activity…</div>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- Right sidebar: token usage + room for future panels -->
+  <aside id="right-sidebar">
+    <div id="usage-panel">
+      <div class="panel-title usage-title">
+        <span>Usage</span>
+        <div class="panel-title-actions">
+          <span id="usage-credit" class="usage-credit" title="OpenRouter remaining credit">—</span>
+          <button class="panel-collapse-btn" type="button" data-collapse-target="usage-panel" aria-label="Toggle Usage panel" aria-expanded="true">⌃</button>
+        </div>
+      </div>
+      <div class="panel-body">
+        <div id="usage-provider-cards"></div>
+        <div id="usage-active"></div>
+        <details class="usage-history-wrap">
+          <summary>history</summary>
+          <div id="usage-history"></div>
+        </details>
+      </div>
+    </div>
+
+    <div id="prompt-trace-panel">
+      <div class="panel-title prompt-trace-title">
+        <span>Prompt Trace</span>
+        <div class="panel-title-actions">
+          <span id="prompt-trace-count" class="prompt-trace-count">0</span>
+          <button class="panel-collapse-btn" type="button" data-collapse-target="prompt-trace-panel" aria-label="Toggle Prompt Trace panel" aria-expanded="true">⌃</button>
+        </div>
+      </div>
+      <div class="panel-body">
+        <div id="prompt-trace-list">
+          <div class="prompt-trace-empty">No Slack prompt traces yet</div>
+        </div>
+      </div>
+    </div>
+
+    <div id="activity-panel">
+      <div class="panel-title activity-title">
+        <span>Tool Activity</span>
+        <div class="panel-title-actions">
+          <span id="activity-status" class="activity-status">—</span>
+          <button class="panel-collapse-btn" type="button" data-collapse-target="activity-panel" aria-label="Toggle Tool Activity panel" aria-expanded="true">⌃</button>
+        </div>
+      </div>
+      <div class="panel-body">
+        <div class="activity-summary" id="activity-summary"></div>
+        <div id="activity-list">
+          <div class="activity-empty">No memory or file activity yet</div>
+        </div>
+      </div>
+    </div>
+  </aside>
+
+</div>
+
+<!-- Connection status toast -->
+<div id="conn-status"></div>
+
+<!-- File viewer modal -->
+<div id="file-modal" class="modal-backdrop" onclick="closeFileViewer(event)">
+  <div class="modal-box" onclick="event.stopPropagation()">
+    <div class="modal-header">
+      <div class="modal-title">
+        <span class="agent-badge" id="modal-badge"></span>
+        <span id="modal-filename"></span>
+      </div>
+      <div class="modal-actions">
+        <span id="modal-meta" class="modal-meta"></span>
+        <a id="modal-download" class="btn btn-small" download>↓ Download</a>
+        <button class="btn btn-small modal-close" onclick="closeFileViewer()">✕</button>
+      </div>
+    </div>
+    <div class="modal-body" id="modal-body">
+      <div class="modal-loading">Loading…</div>
+    </div>
+  </div>
+</div>
+
+<!-- Kanban card drawer (right-side panel) -->
+<div id="card-drawer" class="card-drawer">
+  <div class="card-drawer-header">
+    <div class="card-drawer-title">
+      <span id="card-drawer-id" class="card-id"></span>
+      <span id="card-drawer-status" class="card-status"></span>
+    </div>
+    <button class="btn btn-small" onclick="closeCardDrawer()">✕</button>
+  </div>
+  <div class="card-drawer-body" id="card-drawer-body">
+    <div class="card-drawer-loading">Loading…</div>
+  </div>
+</div>
+
+<script src="/static/marked.min.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>
