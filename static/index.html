@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Hermes Monitor</title>
+  <title>Hermes Console</title>
   <link rel="stylesheet" href="/static/style.css" />
 </head>
 <body>
@@ -14,7 +14,9 @@
   <header id="header">
     <div class="logo">
       <span class="logo-emoji">🪽</span>
-      <span>Hermes Monitor</span>
+      <span>Hermes Console</span>
+      <span id="hermes-dir-pill" class="header-pill" title="" style="cursor:pointer;font-size:0.75em;opacity:0.8;margin-left:8px;padding:2px 8px;background:rgba(255,255,255,0.15);border-radius:12px;font-family:monospace"></span>
+      <span id="gateway-pill" class="header-pill" style="font-size:0.75em;opacity:0.8;margin-left:6px;padding:2px 8px;background:rgba(255,255,255,0.15);border-radius:12px"></span>
     </div>
     <div class="header-status" id="header-status">
       <span id="navbar-time" class="navbar-time">—</span>
@@ -29,42 +31,60 @@
       <span class="pill pill-blocked" title="blocked / scheduled">— blocked</span>
       <span class="pill pill-done"    title="done (lifetime)">— done</span>
     </div>
+    <button id="settings-btn" onclick="toggleSettings()" title="Settings" style="background:none;border:none;cursor:pointer;font-size:1.2em;color:inherit;padding:4px 8px;margin-left:8px">⚙</button>
   </header>
 
   <!-- Left sidebar: agents + files + backup -->
   <aside id="left-sidebar">
 
     <!-- Agents panel -->
-    <div id="agents">
-      <div class="panel-title">Agents</div>
-      <div id="agent-cards"></div>
+    <div id="agents-panel" class="sidebar-panel">
+      <div class="panel-title">
+        <span>Agents</span>
+        <div class="panel-title-actions">
+          <button class="panel-collapse-btn" type="button" data-collapse-target="agents-panel" aria-label="Toggle Agents panel" aria-expanded="true">⌃</button>
+        </div>
+      </div>
+      <div class="panel-body">
+        <div id="agent-cards"></div>
+      </div>
     </div>
 
     <!-- Files panel -->
-    <div id="files-panel">
+    <div id="files-panel" class="sidebar-panel">
       <div class="panel-title files-title">
         <span>Generated Files</span>
-        <span id="files-count" class="files-count">0</span>
+        <div class="panel-title-actions">
+          <span id="files-count" class="files-count">0</span>
+          <button class="panel-collapse-btn" type="button" data-collapse-target="files-panel" aria-label="Toggle Files panel" aria-expanded="true">⌃</button>
+        </div>
       </div>
-      <div id="files-list">
-        <div class="files-empty" id="files-empty">No files yet</div>
+      <div class="panel-body">
+        <div id="files-list">
+          <div class="files-empty" id="files-empty">No files yet</div>
+        </div>
       </div>
     </div>
 
     <!-- Backup panel (sf_agents git — not hermes backup zip) -->
-    <div id="backup-panel">
+    <div id="backup-panel" class="sidebar-panel">
       <div class="panel-title backup-title">
         <span>Config backup</span>
-        <span id="backup-dirty-badge" class="backup-dirty-badge" style="display:none" title="Uncommitted changes in the backup repo">uncommitted</span>
+        <div class="panel-title-actions">
+          <span id="backup-dirty-badge" class="backup-dirty-badge" style="display:none" title="Uncommitted changes in the backup repo">uncommitted</span>
+          <button class="panel-collapse-btn" type="button" data-collapse-target="backup-panel" aria-label="Toggle Backup panel" aria-expanded="true">⌃</button>
+        </div>
       </div>
-      <div class="backup-repo" id="backup-repo" title=""></div>
-      <div id="backup-info">
-        <div class="backup-commit" id="backup-commit">Not configured</div>
-        <div class="backup-date" id="backup-date"></div>
+      <div class="panel-body">
+        <div class="backup-repo" id="backup-repo" title=""></div>
+        <div id="backup-info">
+          <div class="backup-commit" id="backup-commit">Not configured</div>
+          <div class="backup-date" id="backup-date"></div>
+        </div>
+        <button class="btn btn-small btn-backup" id="btn-backup" onclick="runBackup()" title="Run backup.sh: ~/.hermes → sf_agents git commit">↑ Backup Now</button>
+        <div class="backup-hint">Full home zip: <code>hermes backup</code> in Terminal</div>
+        <div id="backup-output" class="backup-output" style="display:none"></div>
       </div>
-      <button class="btn btn-small btn-backup" id="btn-backup" onclick="runBackup()" title="Run backup.sh: ~/.hermes → sf_agents git commit">↑ Backup Now</button>
-      <div class="backup-hint">Full home zip: <code>hermes backup</code> in Terminal</div>
-      <div id="backup-output" class="backup-output" style="display:none"></div>
     </div>
 
   </aside>
@@ -110,6 +130,37 @@
       </div>
     </section>
 
+    <!-- Cron Jobs Panel -->
+    <section id="cron-panel" class="cron-section">
+      <div class="panel-title cron-panel-title">
+        <span>⏰ Cron Jobs</span>
+        <div class="panel-title-actions">
+          <button class="panel-icon-btn" onclick="loadCronJobs()" title="Refresh cron jobs">↻</button>
+          <button class="panel-collapse-btn" type="button" data-collapse-target="cron-panel" aria-label="Toggle Cron Jobs panel" aria-expanded="true">⌃</button>
+        </div>
+      </div>
+      <div class="panel-body" id="cron-panel-body">
+        <div class="cron-table-wrap">
+          <table class="cron-table">
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Schedule</th>
+                <th>Profile</th>
+                <th>Status</th>
+                <th>Last run</th>
+                <th>Next run</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody id="cron-tbody">
+              <tr><td colspan="7" class="cron-empty">Loading…</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
     <!-- Activity feed -->
     <section id="feed">
       <div class="feed-header">
@@ -139,7 +190,7 @@
 
   <!-- Right sidebar: token usage + room for future panels -->
   <aside id="right-sidebar">
-    <div id="usage-panel">
+    <div id="usage-panel" class="sidebar-panel">
       <div class="panel-title usage-title">
         <span>Usage</span>
         <div class="panel-title-actions">
@@ -157,7 +208,7 @@
       </div>
     </div>
 
-    <div id="prompt-trace-panel">
+    <div id="prompt-trace-panel" class="sidebar-panel">
       <div class="panel-title prompt-trace-title">
         <span>Prompt Trace</span>
         <div class="panel-title-actions">
@@ -172,7 +223,7 @@
       </div>
     </div>
 
-    <div id="activity-panel">
+    <div id="activity-panel" class="sidebar-panel">
       <div class="panel-title activity-title">
         <span>Tool Activity</span>
         <div class="panel-title-actions">
@@ -225,6 +276,164 @@
   </div>
   <div class="card-drawer-body" id="card-drawer-body">
     <div class="card-drawer-loading">Loading…</div>
+  </div>
+</div>
+
+<!-- Settings slide-out panel -->
+<div id="settings-overlay" class="settings-overlay" onclick="if(event.target===this)closeSettings()"></div>
+<div id="settings-panel" class="settings-panel">
+  <div class="settings-panel-hdr">
+    <span class="settings-panel-ttl">⚙ Settings</span>
+    <button class="settings-close-btn" onclick="closeSettings()">✕</button>
+  </div>
+  <div class="settings-tabs-bar" id="settings-tabs-bar">
+    <button class="stab stab-active" data-tab="connection"  onclick="switchSettingsTab('connection')">Connection</button>
+    <button class="stab"             data-tab="monitoring"  onclick="switchSettingsTab('monitoring')">Monitoring</button>
+    <button class="stab"             data-tab="backup"      onclick="switchSettingsTab('backup')">Backup</button>
+    <button class="stab"             data-tab="data"        onclick="switchSettingsTab('data')">Data</button>
+    <button class="stab"             data-tab="panels"      onclick="switchSettingsTab('panels')">Panels</button>
+  </div>
+
+  <!-- ── Connection tab ── -->
+  <div class="stab-body" id="stab-connection">
+    <div class="sfield">
+      <div class="sfield-label">Hermes Directory</div>
+      <div class="sfield-hint">Path to the hermes home dir this console monitors</div>
+      <input id="cfg-hermes-dir" type="text" class="sfield-input sfield-mono" placeholder="~/.hermes">
+    </div>
+    <div class="sfield">
+      <div class="sfield-label">Orchestrator</div>
+      <div class="sfield-hint">Agent ID of the gateway (default: sage)</div>
+      <input id="cfg-orchestrator" type="text" class="sfield-input" placeholder="sage">
+    </div>
+    <div class="sfield">
+      <div class="sfield-label">Docker Container</div>
+      <div class="sfield-hint">Container name for start/stop/restart. Leave blank to use launchctl (macOS) mode.</div>
+      <input id="cfg-docker" type="text" class="sfield-input sfield-mono" placeholder="hermes-lab">
+    </div>
+    <div class="sfield">
+      <div class="sfield-label">Web UI Port <span class="restart-badge">↺ restart</span></div>
+      <div class="sfield-hint">Port the web server listens on (default: 7979)</div>
+      <input id="cfg-port" type="number" class="sfield-input" placeholder="7979" min="1024" max="65535">
+    </div>
+    <div class="sfield">
+      <div class="sfield-label">Extra Hermes Home</div>
+      <div class="sfield-hint">Optional second hermes home to watch alongside the primary (HERMES_EXTRA_HOME)</div>
+      <input id="cfg-extra-home" type="text" class="sfield-input sfield-mono" placeholder="/tmp/hermes-other/home">
+    </div>
+    <div class="sfield-actions">
+      <button class="sbtn sbtn-primary" onclick="saveSettings('connection')">Save Connection</button>
+      <div class="sfield-status" id="status-connection"></div>
+    </div>
+  </div>
+
+  <!-- ── Monitoring tab ── -->
+  <div class="stab-body" id="stab-monitoring" style="display:none">
+    <div class="sfield" id="sfield-trace-chip"></div>
+    <div class="sfield">
+      <div class="sfield-label">Prompt Trace Mode <span class="restart-badge">↺ restart</span></div>
+      <div class="sfield-hint">Controls which agent events are forwarded to Slack</div>
+      <select id="cfg-trace-mode" class="sfield-input">
+        <option value="off">off — no Slack trace posts</option>
+        <option value="milestones">milestones — task start/end only (default)</option>
+        <option value="verbose">verbose — every tool call</option>
+      </select>
+    </div>
+    <div class="sfield">
+      <div class="sfield-label">Slack Trace Channel <span class="restart-badge">↺ restart</span></div>
+      <div class="sfield-hint">Channel ID where trace events are posted. Token is read from HERMES_DIR/.env automatically.</div>
+      <input id="cfg-slack-channel" type="text" class="sfield-input sfield-mono" placeholder="C0B9VCZA345">
+    </div>
+    <div class="sfield">
+      <div class="sfield-label">Warmup Freshness (seconds)</div>
+      <div class="sfield-hint">Sessions older than this skip replay on reconnect. Default: 21600 (6 h)</div>
+      <input id="cfg-warmup" type="number" class="sfield-input" placeholder="21600" min="60">
+    </div>
+    <div class="sfield-actions">
+      <button class="sbtn sbtn-primary" onclick="saveSettings('monitoring')">Save Monitoring</button>
+      <div class="sfield-status" id="status-monitoring"></div>
+    </div>
+  </div>
+
+  <!-- ── Backup tab ── -->
+  <div class="stab-body" id="stab-backup" style="display:none">
+    <div class="sfield" id="sfield-backup-chip"></div>
+    <div class="sfield">
+      <div class="sfield-label">Backup Repo Path</div>
+      <div class="sfield-hint">Local git repo where hermes config is committed (HERMES_BACKUP_REPO)</div>
+      <input id="cfg-backup-repo" type="text" class="sfield-input sfield-mono" placeholder="/Users/you/repos/sf_agents">
+    </div>
+    <div class="sfield">
+      <div class="sfield-label">Backup Script Path</div>
+      <div class="sfield-hint">Shell script that copies hermes home → repo and commits (HERMES_BACKUP_SCRIPT). Required for "Backup Now".</div>
+      <input id="cfg-backup-script" type="text" class="sfield-input sfield-mono" placeholder="/Users/you/repos/sf_agents/backup.sh">
+    </div>
+    <div class="sfield-actions">
+      <button class="sbtn sbtn-primary" onclick="saveSettings('backup')">Save Backup</button>
+      <div class="sfield-status" id="status-backup"></div>
+    </div>
+  </div>
+
+  <!-- ── Data tab ── -->
+  <div class="stab-body" id="stab-data" style="display:none">
+    <div class="sfield">
+      <div class="sfield-label">Vector / Log DB URL <span class="restart-badge">↺ restart</span></div>
+      <div class="sfield-hint">PostgreSQL connection string for agent logs and usage stats (HERMES_LOG_DB_URL)</div>
+      <input id="cfg-vector-db" type="text" class="sfield-input sfield-mono" placeholder="postgresql://user:pass@host:5432/db">
+    </div>
+    <div class="sfield">
+      <div class="sfield-label">Files Max Age (days)</div>
+      <div class="sfield-hint">Generated files older than this are removed from the Files panel (HERMES_FILES_MAX_AGE_DAYS, default 14)</div>
+      <input id="cfg-files-age" type="number" class="sfield-input" placeholder="14" min="1" max="365">
+    </div>
+    <div class="sfield">
+      <div class="sfield-label">Files Max Entries</div>
+      <div class="sfield-hint">Maximum number of files tracked in the Files panel (HERMES_FILES_MAX_ENTRIES, default 80)</div>
+      <input id="cfg-files-count" type="number" class="sfield-input" placeholder="80" min="10" max="500">
+    </div>
+    <div class="sfield-actions">
+      <button class="sbtn sbtn-primary" onclick="saveSettings('data')">Save Data Settings</button>
+      <div class="sfield-status" id="status-data"></div>
+    </div>
+  </div>
+
+  <!-- ── Panels tab ── -->
+  <div class="stab-body" id="stab-panels" style="display:none">
+    <div class="sfield-section-lbl">Appearance</div>
+    <div class="stoggle-row">
+      <span>Dark Mode</span>
+      <label class="sw"><input id="toggle-dark" type="checkbox" onchange="applyAppearance()"><span class="sw-slider"></span></label>
+    </div>
+    <div class="stoggle-row">
+      <span>Compact Mode</span>
+      <label class="sw"><input id="toggle-compact" type="checkbox" onchange="applyAppearance()"><span class="sw-slider"></span></label>
+    </div>
+    <div class="sfield-section-lbl" style="margin-top:20px">Visible Panels</div>
+    <div class="sfield-hint" style="margin-bottom:10px">Changes take effect immediately and persist across page loads.</div>
+    <div class="stoggle-row">
+      <span>Usage &amp; Tokens</span>
+      <label class="sw"><input id="panel-usage" type="checkbox" onchange="applyPanelVisibility()"><span class="sw-slider"></span></label>
+    </div>
+    <div class="stoggle-row">
+      <span>Config Backup</span>
+      <label class="sw"><input id="panel-backup" type="checkbox" onchange="applyPanelVisibility()"><span class="sw-slider"></span></label>
+    </div>
+    <div class="stoggle-row">
+      <span>Prompt Traces</span>
+      <label class="sw"><input id="panel-traces" type="checkbox" onchange="applyPanelVisibility()"><span class="sw-slider"></span></label>
+    </div>
+    <div class="stoggle-row">
+      <span>Tool Activity</span>
+      <label class="sw"><input id="panel-activity" type="checkbox" onchange="applyPanelVisibility()"><span class="sw-slider"></span></label>
+    </div>
+    <div class="stoggle-row">
+      <span>Generated Files</span>
+      <label class="sw"><input id="panel-files" type="checkbox" onchange="applyPanelVisibility()"><span class="sw-slider"></span></label>
+    </div>
+    <div class="stoggle-row">
+      <span>Cron Jobs</span>
+      <label class="sw"><input id="panel-cron" type="checkbox" onchange="applyPanelVisibility()"><span class="sw-slider"></span></label>
+    </div>
   </div>
 </div>
 

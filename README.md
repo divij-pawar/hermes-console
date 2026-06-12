@@ -1,108 +1,276 @@
-# Hermes Web UI
+# Hermes Console
 
-Lightweight dashboard for watching Hermes agents (Sage, Imagine, future
-specialists) in real time. Ported from the OpenClaw Monitor.
+Real-time control panel dashboard for the Hermes multi-agent system. Watches session
+JSONL files, kanban state, live gateway/agent logs, and output directories across
+all active profiles.
+
+Drop this folder into any Hermes workflow — it discovers agents, reads the right
+paths, and adapts to Docker or native gateways entirely through a single `.env`
+file.
+
+---
 
 ## What it shows
 
-- **Agents panel** — per-agent active/idle status, current session id, last seen
-- **Activity feed** — assistant turns, tool calls, file writes, delegation
-  events streamed live via SSE
-- **Generated Files** — every file dropped into `~/.hermes/workspace/<agent>/output/`
-- **Logs** — tail of `~/.hermes/logs/gateway.log` and the relay stub log
-- **Relay sidecar** — start/stop/restart button. In Hermes the relay is a
-  no-op stub (Kanban handles inter-bot work). It's kept so the UI control
-  still has a process to manage.
-- **Config backup** — syncs `~/.hermes/` into the `sf_agents` git repo via
-  `backup.sh`. Auto-detects `~/Documents/sf_agents` when present. Override
-  with `HERMES_BACKUP_REPO` / `HERMES_BACKUP_SCRIPT`. Not the same as
-  `hermes backup` (full-home zip).
+| Panel | What you see |
+|---|---|
+| **Agents** | Per-agent active/idle dot, current session ID, start/stop/restart controls |
+| **Activity feed** | Assistant turns, tool calls, file writes, delegations — live via SSE |
+| **Kanban board** | Inter-agent task cards (created → running → blocked → done) |
+| **Generated files** | Every file dropped into `workspace/<agent>/output/` |
+| **Token usage** | Live API-call tracking, cost estimation, daily rollups — only shows providers that are configured |
+| **Health** | API credit status, gateway/platform connectivity, stalled tasks |
+| **Prompt traces** | Slack inbound timeline with per-prompt cost breakdown |
 
-## Start
+---
+
+## Quick start
+
+### 1. Copy and fill in your config
 
 ```bash
-# Foreground
-python3 ~/.hermes/web-ui/server.py
+cp .env.example .env
+# Edit .env — set HERMES_DIR at minimum
+```
 
-# Browse to
+The only required value is `HERMES_DIR`. Everything else has a working default.
+
+### 2. Start
+
+```bash
+python3 server.py
 open http://localhost:7979
 ```
 
-The server uses only Python stdlib — no dependencies.
+No pip dependencies — stdlib only.
 
-## Slack trace channel (`#hermes_trace`)
+---
 
-The Monitor mirrors high-signal workflow events to Slack when `SLACK_BOT_TOKEN`
-and `SLACK_TRACE_CHANNEL` are set in `~/.hermes/.env`.
+## Configuration — `.env`
 
-| Env | Default | Effect |
-|-----|---------|--------|
-| `HERMES_TRACE_MODE` | `milestones` | Quiet milestone posts only |
-| `HERMES_TRACE_MODE` | `verbose` | Legacy: per-file writes, status churn, delegations |
-
-**Milestones mode** posts: user ask (inbound), kanban create/claim/rich done,
-blocked, delivered to front. **Incidents** always post (even in milestone mode):
-tool errors, `finish_reason=error`, empty-response exhaustion, degraded/gaps on
-done, Slack delivery failures.
-
-Full tool chains, Tavily/x_search lines, and prompt-trace costs stay in the
-Monitor UI only — not duplicated in Slack.
-
-Restart Monitor after changing trace mode or `server.py`:
+All settings live in `.env` in this directory. Copy `.env.example` to get started:
 
 ```bash
-~/.hermes/web-ui/restart.sh
-# or: ~/.hermes/web-ui/start.sh   (wrapper to restart.sh)
+cp .env.example .env
 ```
 
-`restart.sh` restarts the Monitor if it is already running, or starts it if not.
-Gateways are untouched. For the full fleet (gateways + Monitor), use
-`start-fleet.sh`.
+| Variable | Default | Description |
+|---|---|---|
+| `HERMES_DIR` | `~/.hermes` | Hermes home directory. All profiles, kanban DB, and logs are read from here. |
+| `HERMES_ORCHESTRATOR` | `sage` | Root agent name — the one whose sessions live directly in `HERMES_DIR` rather than under `profiles/<name>`. Change this if your workflow uses a different name for the default agent. |
+| `HERMES_WEBUI_PORT` | `7979` | HTTP port the dashboard listens on. |
+| `HERMES_MONITOR_DB` | `<web-ui>/monitor.db` | SQLite file for API usage events and prompt traces. Set a different path when running two instances so they don't share data. |
+| `HERMES_DOCKER_CONTAINER` | _(unset)_ | Docker container name. When set, start/stop/restart buttons use `docker` commands instead of `launchctl`. Leave blank for a native macOS launchd-managed gateway. |
+| `HERMES_EXTRA_HOME` | _(unset)_ | Second Hermes home to monitor alongside the primary one. Use this to show both production and lab agents in a single dashboard. |
+| `HERMES_BACKUP_REPO` | _(unset)_ | Git repo path containing `backup.sh`. Enables the backup panel. Leave blank to hide it. |
+| `HERMES_BACKUP_SCRIPT` | _(auto)_ | Path to `backup.sh`. Auto-detected as `HERMES_BACKUP_REPO/backup.sh` if not set. |
+| `SLACK_BOT_TOKEN` | _(unset)_ | Slack bot token (`xoxb-…`) for the trace mirror. Falls back to reading `HERMES_DIR/.env`. |
+| `SLACK_TRACE_CHANNEL` | _(unset)_ | Channel ID for the Slack trace mirror. Both this and `SLACK_BOT_TOKEN` must be set to enable. |
+| `HERMES_TRACE_MODE` | `milestones` | Slack mirror verbosity: `milestones` (quiet) or `verbose` (all tool calls). |
+| `HERMES_WEBUI_WARMUP_FRESHNESS` | `21600` | Seconds of past session events to replay into the activity feed on startup. Set to `0` for a clean feed. |
 
-## Architecture
+**Priority order (highest to lowest):** shell environment → `.env.local` → `.env` → built-in defaults.
 
-```
-server.py         HTTP + SSE on port 7979. Spawns a Watcher thread that polls
-                  session jsonl files, output dirs, and the gateway log.
-relay.py          No-op idle process. Hermes uses Kanban for cross-bot
-                  delegation, not a Slack relay. This file is kept so the
-                  UI's start/stop control still has something to manage.
-watch_agents.py   Standalone terminal trajectory viewer. Tails the latest
-                  session jsonl for a chosen agent.
-static/           index.html + app.js + style.css (vanilla JS, no build).
-```
+Use `.env.local` for machine-specific overrides that you don't want to commit.
 
-## Per-agent paths
+---
 
-| Agent     | Session jsonl                              | Output dir                                    |
-|-----------|--------------------------------------------|-----------------------------------------------|
-| `sage`    | `~/.hermes/sessions/*.jsonl`               | `~/.hermes/workspace/sage/output/`            |
-| `imagine` | `~/.hermes/profiles/imagine/sessions/*.jsonl` | `~/.hermes/workspace/imagine/output/`     |
+## Dynamic agent discovery
 
-Adding a new specialist: append to `AGENT_IDS` in `server.py` and the
-`AGENT_META` map in `static/app.js`. The agent root resolver
-(`_agent_root()`) automatically maps any non-`sage` id to
-`~/.hermes/profiles/<id>/`.
+Agents are discovered automatically at startup from `HERMES_DIR/profiles/`.
+**You do not need to edit `server.py` or `app.js` when you add a new profile.**
 
-## Config backup (sf_agents)
+- The orchestrator (`HERMES_ORCHESTRATOR`) is always included as the root agent
+- Any `profiles/<name>/` subdirectory is picked up automatically
+- Well-known agents (sage, imagine, ink, recon, signal, anton) get fixed colors and emojis; new profiles get the next slot from a built-in palette
 
-If `~/Documents/sf_agents/backup.sh` exists, the panel works with no env vars.
+The frontend bootstraps the agent list from `/api/agents` on page load.
 
-Optional overrides:
+---
+
+## Running two instances — production + Docker lab
+
+Start two separate monitor instances on different ports, each with its own config.
+
+### Instance 1 — production (port 7979)
 
 ```bash
-export HERMES_BACKUP_REPO=~/Documents/sf_agents
-export HERMES_BACKUP_SCRIPT=~/Documents/sf_agents/backup.sh
-python3 ~/.hermes/web-ui/server.py
+cp .env.example .env
+# Edit .env — HERMES_DIR=~/.hermes, HERMES_WEBUI_PORT=7979
+python3 server.py
 ```
 
-| Action | Tool |
-|--------|------|
-| Git config snapshot | Monitor **Backup Now** or `./backup.sh` |
-| Restore from git | `cd ~/Documents/sf_agents && ./setup.sh` |
-| Full `~/.hermes` zip | `hermes backup` in Terminal |
+### Instance 2 — Docker lab (port 7980)
+
+```bash
+cp .env.lab.example .env.lab
+# Edit .env.lab — set HERMES_DIR, HERMES_DOCKER_CONTAINER
+./start-lab.sh
+```
+
+`start-lab.sh` loads `.env.lab` automatically. The lab instance gets its own
+isolated monitor DB, port, and Docker container control — no production data
+bleeds in.
+
+---
+
+## Docker lab setup (`.env.lab`)
+
+```bash
+cp .env.lab.example .env.lab
+```
+
+Key values to fill in:
+
+```bash
+# Host-side path to the container's bind-mounted Hermes home
+HERMES_DIR=/tmp/hermes-anton-lab/home
+
+# Must differ from the production monitor port
+HERMES_WEBUI_PORT=7980
+
+# Container name from docker-compose.anton.yml
+HERMES_DOCKER_CONTAINER=hermes-anton-lab
+```
+
+The monitor runs entirely on the **host** — no Docker exec or port forwarding needed.
+It reads the bind-mounted files directly.
+
+```
+Mac Mini host
+├── python3 server.py (port 7979)   ← reads ~/.hermes (production)
+├── ./start-lab.sh   (port 7980)    ← reads /tmp/hermes-anton-lab/home (lab)
+└── Docker
+    └── hermes-anton container
+        └── /lab → /tmp/hermes-anton-lab (bind-mount)
+```
+
+Prerequisites:
+1. Container is running: `docker compose -f docker/docker-compose.anton.yml up`
+2. Bind-mount path exists: `ls /tmp/hermes-anton-lab/home`
+
+```bash
+./start-lab.sh
+
+# Override port if 7980 is taken
+./start-lab.sh --port 7981
+
+# Override lab home path
+./start-lab.sh --lab-home /some/other/path
+```
+
+---
+
+## Dropping into a new Hermes workflow
+
+1. Copy this `web-ui/` folder into the new project
+2. `cp .env.example .env`
+3. Fill in `HERMES_DIR`, `HERMES_ORCHESTRATOR`, `HERMES_WEBUI_PORT`
+4. `python3 server.py`
+
+Agent discovery, log paths, kanban DB, and API provider detection all resolve
+from `HERMES_DIR` automatically. Nothing else to change.
+
+---
+
+## Slack trace mirror
+
+When `SLACK_BOT_TOKEN` and `SLACK_TRACE_CHANNEL` are set, the monitor mirrors
+high-signal events to Slack.
+
+**Milestones mode** (default): user ask, kanban create/claim/done, blocked, delivered.
+
+**Incidents** always post regardless of mode: tool errors, API exhaustion, delivery failures.
+
+Full tool chains, search calls, and per-prompt costs stay in the dashboard only.
+
+---
+
+## Settings Panel
+
+Click the **⚙** gear button in the top-right corner of the header to open the settings slide-out panel.
+
+### Connection tab
+
+Writes settings to `.env.local` (in the `web-ui/` directory) and reloads the server on save.
+
+| Field | Env var | Description |
+|---|---|---|
+| HERMES_DIR | `HERMES_DIR` | Path to the Hermes home directory |
+| Orchestrator | `HERMES_ORCHESTRATOR` | Root agent name (default: `sage`) |
+| Docker Container | `HERMES_DOCKER_CONTAINER` | Container name, or blank for launchctl mode |
+| Web UI Port | `HERMES_WEBUI_PORT` | HTTP port (requires restart to take effect) |
+| Backup Repo Path | `HERMES_BACKUP_REPO` | Git repo containing `backup.sh` |
+
+Click **Save & Restart** to write `.env.local` and reload the page after 1.5 s.
+
+### Appearance tab
+
+Stored in `localStorage` — no server round-trip needed.
+
+- **Dark Mode** — applies `.dark-mode` CSS class to `<body>`
+- **Compact Mode** — tighter panel spacing via `.compact-mode` CSS class
+- **Visible Panels** — show/hide individual sidebar panels (Usage, Backup, Prompt Traces, Tool Activity, Files, Cron Jobs)
+
+---
+
+## HTTP API
+
+| Method | Path | Returns |
+|---|---|---|
+| GET | `/api/agents` | All discovered agents with id, label, emoji, color, root, is_extra |
+| GET | `/api/status` | Agent active/idle state + kanban counts, worker PIDs |
+| GET | `/api/events` | SSE stream of all live events |
+| GET | `/api/info` | Server info: hermes_dir, orchestrator, docker_container, version, worker PIDs |
+| GET | `/api/settings` | Current env-driven config |
+| POST | `/api/settings` | Write settings to `.env.local` (requires restart) |
+| GET | `/api/cron` | List all scheduled cron jobs |
+| POST | `/api/cron/<id>/<pause\|resume\|run>` | Control a cron job |
+| GET | `/api/kanban` | Full kanban board snapshot |
+| GET | `/api/kanban/card/<id>` | Single card detail with events, runs, comments, log tail |
+| GET | `/api/files` | List of generated output files |
+| GET | `/api/file?path=<enc>` | File content (image, text, HTML) |
+| GET | `/api/usage` | Token usage ledger — only configured providers returned |
+| GET | `/api/activity` | Tool activity rows from the Postgres activity table |
+| GET | `/api/prompt-traces` | Slack prompt trace history |
+| GET | `/api/health` | Active health issues |
+| GET | `/api/logs?source=<agent>&lines=<n>` | Log tail for any agent |
+| GET | `/api/backup/status` | Git backup repo status |
+| POST | `/api/backup/run` | Run `backup.sh` |
+| POST | `/api/kanban/archive-done` | Archive all done cards |
+| POST | `/api/kanban/card/<id>/archive` | Archive one card |
+| POST | `/api/kanban/card/<id>/cancel` | Reclaim + archive a running card |
+| POST | `/api/agent/<id>/<start\|stop\|restart>` | Control a gateway (launchd or Docker) |
+
+---
+
+## File layout
+
+```
+server.py            HTTP + SSE backend. Loads .env on startup, then spawns a
+                     Watcher thread that polls JSONL, logs, state.db, kanban.db.
+.env.example         Template for production config — copy to .env.
+.env.lab.example     Template for Docker lab config — copy to .env.lab.
+start.sh             Start production monitor (wrapper around restart.sh).
+start-lab.sh         Start lab monitor — loads .env.lab, uses Docker control.
+restart.sh           Restart if running, start if not (launchd-managed).
+start-fleet.sh       Full fleet startup: Sage + Imagine gateways + Monitor.
+stop.sh              Stop the monitor service.
+watch_agents.py      Standalone terminal trajectory viewer (tails session JSONL).
+static/
+  index.html         Single-page app shell.
+  app.js             Vanilla JS. Bootstraps agent list from /api/agents on load.
+  style.css          Dark theme.
+  marked.min.js      Markdown renderer for kanban card bodies.
+monitor.db           SQLite usage ledger (auto-created, path set by HERMES_MONITOR_DB).
+```
+
+---
 
 ## Run as a launchd service (macOS)
+
+Configuration is read from `web-ui/.env` at startup — no `EnvironmentVariables`
+block needed in the plist.
 
 Drop the following at `~/Library/LaunchAgents/sh.hermes.webui.plist`:
 
@@ -116,22 +284,16 @@ Drop the following at `~/Library/LaunchAgents/sh.hermes.webui.plist`:
   <key>ProgramArguments</key>
   <array>
     <string>/usr/bin/python3</string>
-    <string>/Users/divijpawar/.hermes/web-ui/server.py</string>
+    <string>/path/to/web-ui/server.py</string>
   </array>
-  <key>EnvironmentVariables</key>
-  <dict>
-    <key>HERMES_BACKUP_REPO</key><string>/Users/divijpawar/Documents/sf_agents</string>
-    <key>HERMES_BACKUP_SCRIPT</key><string>/Users/divijpawar/Documents/sf_agents/backup.sh</string>
-  </dict>
+  <key>WorkingDirectory</key><string>/path/to/web-ui</string>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
-  <key>StandardOutPath</key><string>/Users/divijpawar/.hermes/logs/webui.log</string>
-  <key>StandardErrorPath</key><string>/Users/divijpawar/.hermes/logs/webui.log</string>
+  <key>StandardOutPath</key><string>/tmp/hermes-webui.log</string>
+  <key>StandardErrorPath</key><string>/tmp/hermes-webui.log</string>
 </dict>
 </plist>
 ```
-
-Then:
 
 ```bash
 launchctl load ~/Library/LaunchAgents/sh.hermes.webui.plist

@@ -1,18 +1,37 @@
-/* Hermes Monitor — app.js
+/* Hermes Console — app.js
    Vanilla JS, no frameworks. Uses EventSource for SSE, fetch for API.
 */
 
 // ── Constants ──────────────────────────────────────────────────────────────
 
-const AGENT_IDS = ["sage", "imagine", "ink", "recon", "signal"];
+// AGENT_IDS and AGENT_META are populated at startup from /api/agents so new
+// profiles are picked up automatically — no manual edits needed here.
+let AGENT_IDS = [];
+let AGENT_META = {};
+let orchestratorId = "sage";
 
-const AGENT_META = {
-  sage:    { emoji: "🧭", color: "#58a6ff", label: "SAGE" },
-  imagine: { emoji: "🎨", color: "#bc8cff", label: "IMAGINE" },
-  ink:     { emoji: "🖊️", color: "#3fb950", label: "INK" },
-  recon:   { emoji: "🔎", color: "#f0883e", label: "RECON" },
-  signal:  { emoji: "📡", color: "#79c0ff", label: "SIGNAL" },
-};
+// Fallback palette for agents that arrive via SSE before /api/agents resolves.
+const _PALETTE = [
+  { color: "#58a6ff", emoji: "🧭" }, { color: "#bc8cff", emoji: "🎨" },
+  { color: "#3fb950", emoji: "🖊️"  }, { color: "#f0883e", emoji: "🔎" },
+  { color: "#79c0ff", emoji: "📡" }, { color: "#e3b341", emoji: "🔨" },
+  { color: "#a5d6ff", emoji: "⚡" }, { color: "#f778ba", emoji: "🔬" },
+  { color: "#56d364", emoji: "🎯" }, { color: "#ff7b72", emoji: "💡" },
+];
+let _paletteIdx = 0;
+
+function _metaFor(agentId) {
+  if (AGENT_META[agentId]) return AGENT_META[agentId];
+  // Auto-register unknown agents that arrive mid-session via SSE.
+  const slot = _PALETTE[_paletteIdx % _PALETTE.length];
+  _paletteIdx++;
+  AGENT_META[agentId] = { emoji: slot.emoji, color: slot.color, label: agentId.toUpperCase() };
+  if (!AGENT_IDS.includes(agentId)) {
+    AGENT_IDS.push(agentId);
+    agentState[agentId] = { active: false, last_seen: null, session: null, lastAction: "" };
+  }
+  return AGENT_META[agentId];
+}
 
 const KIND_ICON = {
   tool_call:      "🔧",
@@ -41,9 +60,6 @@ let latestToolActivityRows = [];
 let promptTraces = [];
 
 const agentState = {};
-AGENT_IDS.forEach(id => {
-  agentState[id] = { active: false, last_seen: null, session: null, lastAction: "" };
-});
 
 const logBuffers = { gateway: [], imagine: [] };
 
@@ -63,6 +79,23 @@ let reconnectTimer = null;
 // ── Health / Issues ────────────────────────────────────────────────────────────
 // issues is a Map of issue_id → issue dict, mirroring server issues_state.
 const issues = new Map();
+const DISMISSED_ISSUES_KEY = "hermes-monitor:dismissed-issues";
+const dismissedIssues = new Set(
+  (() => {
+    try { return JSON.parse(sessionStorage.getItem(DISMISSED_ISSUES_KEY) || "[]"); }
+    catch { return []; }
+  })()
+);
+
+function persistDismissedIssues() {
+  sessionStorage.setItem(DISMISSED_ISSUES_KEY, JSON.stringify([...dismissedIssues]));
+}
+
+function dismissIssue(id) {
+  dismissedIssues.add(id);
+  persistDismissedIssues();
+  renderIssues();
+}
 
 function handleHealthInit(data) {
   issues.clear();
@@ -75,6 +108,8 @@ function handleHealthAlert(data) {
     issues.set(data.issue.id, data.issue);
   } else if (data.action === "resolve") {
     issues.delete(data.issue_id);
+    dismissedIssues.delete(data.issue_id);
+    persistDismissedIssues();
   }
   renderIssues();
 }
@@ -89,7 +124,9 @@ function renderIssues() {
   const countEl   = document.getElementById("health-issue-count");
   if (!panel || !bar || !issuesEl) return;
 
-  const list = [...issues.values()].sort(
+  const list = [...issues.values()]
+    .filter(i => !dismissedIssues.has(i.id))
+    .sort(
     (a, b) => (SEV_ORDER[a.severity] ?? 9) - (SEV_ORDER[b.severity] ?? 9)
   );
   const hasCritical = list.some(i => i.severity === "critical");
@@ -119,7 +156,7 @@ function renderIssues() {
 
   issuesEl.innerHTML = list.map(iss => {
     const icon   = SEV_ICON[iss.severity] || "⚪";
-    const agentMeta = iss.agent ? (AGENT_META[iss.agent] || null) : null;
+    const agentMeta = iss.agent ? (_metaFor(iss.agent)) : null;
     const agentBadge = agentMeta
       ? `<span class="issue-agent-badge" style="color:${agentMeta.color}">${agentMeta.emoji} ${escHtml(agentMeta.label)}</span>`
       : (iss.agent ? `<span class="issue-agent-badge">${escHtml(iss.agent)}</span>` : "");
@@ -135,6 +172,7 @@ function renderIssues() {
         </div>
         ${agentBadge}
         ${ts}
+        <button class="issue-dismiss" type="button" aria-label="Dismiss">✕</button>
       </div>`;
   }).join("")
 ;}
@@ -142,8 +180,38 @@ function renderIssues() {
 // ── Init ───────────────────────────────────────────────────────────────────
 
 document.addEventListener("DOMContentLoaded", () => {
-  buildAgentCards();
+  // Bootstrap agent list from server before rendering so newly discovered
+  // profiles (e.g. Anton from the Docker lab) appear immediately.
+  fetch("/api/agents")
+    .then(r => r.json())
+    .then(data => {
+      if (data.orchestrator) orchestratorId = data.orchestrator;
+      (data.agents || []).forEach(a => {
+        AGENT_META[a.id] = { emoji: a.emoji, color: a.color, label: a.label };
+        if (!AGENT_IDS.includes(a.id)) AGENT_IDS.push(a.id);
+        if (!agentState[a.id])
+          agentState[a.id] = { active: false, last_seen: null, session: null, lastAction: "" };
+      });
+    })
+    .catch(() => {})
+    .finally(() => {
+      buildAgentCards();
+    });
+
   setupCollapsiblePanels();
+  setupKanbanCardActions();
+  setupSidebarResizers("left-sidebar", ["agents-panel", "files-panel", "backup-panel"],
+    "hermes-monitor:left-heights", [0.45, 0.35, 0.20]);
+  setupSidebarResizers("right-sidebar", ["usage-panel", "prompt-trace-panel", "activity-panel"],
+    "hermes-monitor:right-heights", [1 / 3, 1 / 3, 1 / 3]);
+
+  document.getElementById("health-issues")?.addEventListener("click", (e) => {
+    const btn = e.target.closest(".issue-dismiss");
+    if (!btn) return;
+    const row = btn.closest(".health-issue");
+    if (row?.dataset.id) dismissIssue(row.dataset.id);
+  });
+
   updateNavbarClock();
   setInterval(updateNavbarClock, 1000);
   loadInitialFiles();
@@ -224,7 +292,7 @@ function renderUsage(data) {
     } else {
       activeEl.innerHTML = ids.map(aid => {
         const a = active[aid];
-        const meta = AGENT_META[aid] || { emoji: "•", label: aid.toUpperCase(), color: "#999" };
+        const meta = _metaFor(aid);
         const cacheRatio = a.cache_reads
           ? Math.round(100 * a.cache_hits / a.cache_reads)
           : null;
@@ -254,7 +322,7 @@ function renderUsage(data) {
       histEl.innerHTML = `<div class="usage-empty">(empty)</div>`;
     } else {
       histEl.innerHTML = items.map(h => {
-        const meta = AGENT_META[h.agent] || { emoji: "•", label: (h.agent || "?").toUpperCase() };
+        const meta = _metaFor(h.agent);
         return `
           <div class="usage-hist-row">
             <span class="usage-hist-tag">${meta.emoji}</span>
@@ -390,7 +458,7 @@ function renderActivity(data) {
   listEl.innerHTML = rows.map(row => {
     const idx = rows.indexOf(row);
     const agent = row.agent || "unknown";
-    const meta = AGENT_META[agent] || { emoji: "•", label: agent.toUpperCase(), color: "#8b949e" };
+    const meta = _metaFor(agent);
     const toolClass = activityToolClass(row.tool);
     const detail = row.detail || "";
     const extra = row.extra || {};
@@ -452,7 +520,7 @@ function buildAgentCards() {
   const container = document.getElementById("agent-cards");
   container.innerHTML = "";
   AGENT_IDS.forEach(id => {
-    const meta = AGENT_META[id];
+    const meta = _metaFor(id);
     const card = document.createElement("div");
     card.className = "agent-card";
     card.id = `card-${id}`;
@@ -471,6 +539,7 @@ function buildAgentCards() {
       <div class="agent-meta">
         <span id="seen-${id}">Never active</span>
         <span class="agent-session" id="session-${id}"></span>
+        <span class="agent-pids" id="pids-${id}" style="font-size:0.75em;opacity:0.7;margin-left:6px;font-family:monospace"></span>
       </div>
       <div class="agent-action" id="action-${id}"></div>
     `;
@@ -506,7 +575,7 @@ async function agentLifecycle(agentId, action) {
 }
 
 function updateAgentCard(agentId, data) {
-  const meta = AGENT_META[agentId];
+  const meta = _metaFor(agentId);
   if (!meta) return;
 
   const state = agentState[agentId] || {};
@@ -535,6 +604,23 @@ function updateAgentCard(agentId, data) {
 
   if (state.lastAction) {
     action.textContent = state.lastAction;
+  }
+
+  // Show PID badge for workers
+  const pidsEl = document.getElementById(`pids-${agentId}`);
+  if (pidsEl) {
+    const pids = state.pids || [];
+    const wc = state.worker_count || 0;
+    if (pids.length > 0) {
+      pidsEl.textContent = `PID${pids.length > 1 ? 's' : ''}: ${pids.join(', ')}`;
+      pidsEl.title = `${wc} worker${wc !== 1 ? 's' : ''} running`;
+    } else if (wc > 0) {
+      pidsEl.textContent = `${wc} worker${wc !== 1 ? 's' : ''}`;
+      pidsEl.title = '';
+    } else {
+      pidsEl.textContent = '';
+      pidsEl.title = '';
+    }
   }
 
   // Reflect gateway state on the controls. Pure workers (no_gateway) get
@@ -733,7 +819,7 @@ function openPromptTraceViewer(trace, rowEl) {
     trace.final ? `## Final Response\n${trace.final}` : "",
   ].filter(Boolean).join("\n\n");
   openLogViewer({
-    agent: trace.agent || "sage",
+    agent: trace.agent || orchestratorId,
     kind: "prompt_trace",
     title: "Prompt Trace",
     detail: trace.msg || "",
@@ -792,25 +878,49 @@ function renderKanbanCol(el, list, emptyText) {
     return;
   }
   el.innerHTML = list.map(t => {
-    const meta = AGENT_META[t.assignee] || { emoji: "•", color: "#9aa0a6", label: (t.assignee || "?").toUpperCase() };
+    const meta = _metaFor(t.assignee);
     const statusColor = KANBAN_STATUS_COLOR[t.status] || "#9aa0a6";
     const elapsed = t.elapsed_s != null ? `${humanDuration(t.elapsed_s)}` : "";
     return `
-      <div class="kanban-card" data-id="${t.id}" onclick="openCardDrawer('${t.id}')">
+      <div class="kanban-card" data-id="${escHtml(t.id)}">
         <div class="kanban-card-row1">
           <span class="kanban-card-status" style="background:${statusColor}"></span>
           <span class="kanban-card-assignee" style="color:${meta.color}">${meta.emoji} ${meta.label}</span>
           <span class="kanban-card-elapsed">${elapsed}</span>
-          ${t.status !== "done" ? `<button class="kanban-card-cancel" title="Cancel &amp; remove task (reclaim + archive)"
-                  onclick="event.stopPropagation(); cancelCard('${t.id}')">⊘</button>` : ""}
-          <button class="kanban-card-archive" title="Archive card"
-                  onclick="event.stopPropagation(); archiveCard('${t.id}')">✕</button>
+          ${t.status !== "done" ? `<button type="button" class="kanban-card-cancel" title="Cancel &amp; remove task (reclaim + archive)">⊘</button>` : ""}
+          <button type="button" class="kanban-card-archive" title="Archive card">✕</button>
         </div>
         <div class="kanban-card-title">${escHtml(t.title || "")}</div>
         <div class="kanban-card-id">${t.id} · ${t.status}</div>
       </div>
     `;
   }).join("");
+}
+
+function setupKanbanCardActions() {
+  ["kanban-active", "kanban-done"].forEach(colId => {
+    const col = document.getElementById(colId);
+    if (!col || col.dataset.kanbanActionsBound) return;
+    col.dataset.kanbanActionsBound = "1";
+    col.addEventListener("click", (e) => {
+      const card = e.target.closest(".kanban-card");
+      if (!card?.dataset.id) return;
+      const taskId = card.dataset.id;
+      if (e.target.closest(".kanban-card-cancel")) {
+        e.preventDefault();
+        e.stopPropagation();
+        cancelCard(taskId);
+        return;
+      }
+      if (e.target.closest(".kanban-card-archive")) {
+        e.preventDefault();
+        e.stopPropagation();
+        archiveCard(taskId);
+        return;
+      }
+      openCardDrawer(taskId);
+    });
+  });
 }
 
 async function cancelCard(taskId) {
@@ -820,6 +930,7 @@ async function cancelCard(taskId) {
     const data = await res.json();
     if (!data.ok) {
       console.warn("cancel failed", taskId, data.error);
+      alert(`Cancel failed: ${data.error || "unknown error"}`);
       return;
     }
     kanbanBoard.tasks = (kanbanBoard.tasks || []).filter(t => t.id !== taskId);
@@ -837,6 +948,7 @@ async function archiveCard(taskId) {
     const data = await res.json();
     if (!data.ok) {
       console.warn("archive failed", taskId, data.error);
+      alert(`Archive failed: ${data.error || "unknown error"}`);
       return;
     }
     // Remove locally — the server will also broadcast a kanban_board update.
@@ -884,11 +996,11 @@ function renderKanbanPills() {
 }
 
 function appendKanbanFeedEntry(card, prevStatus) {
-  const meta = AGENT_META[card.assignee] || { emoji: "•", label: (card.assignee || "?").toUpperCase() };
+  const meta = _metaFor(card.assignee);
   const transition = prevStatus ? `${prevStatus} → ${card.status}` : card.status;
   appendFeedEvent({
     type: "agent_event",
-    agent: card.assignee || "sage",
+    agent: card.assignee || orchestratorId,
     ts: "",
     kind: "delegation",
     title: `[${card.id}] ${meta.emoji} ${meta.label} · ${transition}`,
@@ -924,7 +1036,7 @@ function closeCardDrawer() {
 
 function renderCardDrawer(data) {
   const t = data.task || {};
-  const meta = AGENT_META[t.assignee] || { emoji: "•", label: (t.assignee || "?").toUpperCase(), color: "#9aa0a6" };
+  const meta = _metaFor(t.assignee);
   document.getElementById("card-drawer-id").innerHTML =
     `<span style="color:${meta.color}">${meta.emoji} ${meta.label}</span> · ${t.id}`;
   document.getElementById("card-drawer-status").innerHTML =
@@ -1137,8 +1249,142 @@ function setupCollapsiblePanels() {
       const collapsed = !panel.classList.contains("panel-collapsed");
       localStorage.setItem(key, collapsed ? "1" : "0");
       apply(collapsed);
+      refreshSidebarLayouts();
     });
   });
+}
+
+const sidebarResizers = {};
+
+function setupSidebarResizers(sidebarId, panelIds, storageKey, defaultRatios) {
+  const sidebar = document.getElementById(sidebarId);
+  if (!sidebar) return;
+
+  const panels = panelIds.map(id => document.getElementById(id)).filter(Boolean);
+  if (panels.length < 2) return;
+
+  sidebar.querySelectorAll(".panel-resizer").forEach(r => r.remove());
+
+  const RESIZER_H = 5;
+  const MIN_EXPANDED = 80;
+  const MIN_COLLAPSED = 28;
+
+  function isCollapsed(panel) {
+    return panel.classList.contains("panel-collapsed");
+  }
+
+  function collapsedHeight(panel) {
+    const title = panel.querySelector(".panel-title");
+    if (!title) return MIN_COLLAPSED;
+    const style = getComputedStyle(panel);
+    const pad = parseFloat(style.paddingTop) + parseFloat(style.paddingBottom);
+    return Math.max(MIN_COLLAPSED, title.offsetHeight + pad);
+  }
+
+  function availableHeight() {
+    return sidebar.clientHeight - (panels.length - 1) * RESIZER_H;
+  }
+
+  function applyHeights(heights) {
+    panels.forEach((panel, i) => {
+      if (isCollapsed(panel)) {
+        panel.style.flex = `0 0 ${collapsedHeight(panel)}px`;
+      } else {
+        panel.style.flex = `0 0 ${heights[i]}px`;
+      }
+    });
+  }
+
+  function loadHeights() {
+    try {
+      const saved = localStorage.getItem(storageKey);
+      if (saved) return JSON.parse(saved);
+    } catch (_) { /* ignore */ }
+    return null;
+  }
+
+  function saveHeights(heights) {
+    localStorage.setItem(storageKey, JSON.stringify(heights));
+  }
+
+  function initHeights() {
+    const total = availableHeight();
+    let heights = loadHeights();
+    if (heights && heights.length === panels.length) {
+      const sum = heights.reduce((a, b) => a + b, 0);
+      if (sum > 0 && Math.abs(sum - total) > 2) {
+        heights = heights.map(h => Math.round(h * total / sum));
+      }
+    } else {
+      heights = defaultRatios.map(r => Math.max(MIN_EXPANDED, Math.round(total * r)));
+      const sum = heights.reduce((a, b) => a + b, 0);
+      heights[heights.length - 1] += total - sum;
+    }
+    applyHeights(heights);
+    return heights;
+  }
+
+  let heights = initHeights();
+
+  for (let i = 0; i < panels.length - 1; i++) {
+    const resizer = document.createElement("div");
+    resizer.className = "panel-resizer";
+    panels[i].after(resizer);
+
+    resizer.addEventListener("mousedown", (e) => {
+      e.preventDefault();
+      const idx = i;
+      const startY = e.clientY;
+      const startTop = isCollapsed(panels[idx]) ? collapsedHeight(panels[idx]) : heights[idx];
+      const startBottom = isCollapsed(panels[idx + 1]) ? collapsedHeight(panels[idx + 1]) : heights[idx + 1];
+      if (isCollapsed(panels[idx]) && isCollapsed(panels[idx + 1])) return;
+
+      resizer.classList.add("dragging");
+
+      function onMove(ev) {
+        const dy = ev.clientY - startY;
+        let newTop = startTop + dy;
+        let newBottom = startBottom - dy;
+        const minTop = isCollapsed(panels[idx]) ? collapsedHeight(panels[idx]) : MIN_EXPANDED;
+        const minBottom = isCollapsed(panels[idx + 1]) ? collapsedHeight(panels[idx + 1]) : MIN_EXPANDED;
+        if (newTop < minTop) {
+          newBottom -= (minTop - newTop);
+          newTop = minTop;
+        }
+        if (newBottom < minBottom) {
+          newTop -= (minBottom - newBottom);
+          newBottom = minBottom;
+        }
+        if (!isCollapsed(panels[idx])) heights[idx] = newTop;
+        if (!isCollapsed(panels[idx + 1])) heights[idx + 1] = newBottom;
+        applyHeights(heights);
+      }
+
+      function onUp() {
+        resizer.classList.remove("dragging");
+        saveHeights(heights);
+        document.removeEventListener("mousemove", onMove);
+        document.removeEventListener("mouseup", onUp);
+      }
+
+      document.addEventListener("mousemove", onMove);
+      document.addEventListener("mouseup", onUp);
+    });
+  }
+
+  sidebarResizers[sidebarId] = {
+    refresh: () => applyHeights(heights),
+    relayout: () => { heights = initHeights(); },
+  };
+
+  window.addEventListener("resize", () => {
+    const ctrl = sidebarResizers[sidebarId];
+    if (ctrl?.relayout) ctrl.relayout();
+  });
+}
+
+function refreshSidebarLayouts() {
+  Object.values(sidebarResizers).forEach(ctrl => ctrl.refresh && ctrl.refresh());
 }
 
 function appendFeedEvent(ev) {
@@ -1146,7 +1392,7 @@ function appendFeedEvent(ev) {
   const empty = document.getElementById("feed-empty");
   if (empty) empty.style.display = "none";
 
-  const meta = AGENT_META[ev.agent] || { label: ev.agent.toUpperCase(), color: "#8b949e" };
+  const meta = _metaFor(ev.agent);
   const icon = KIND_ICON[ev.kind] || "•";
   const timeLabel = formatAmPm(ev.ts);
 
@@ -1346,7 +1592,7 @@ function buildFileEntry(file, animate = true) {
     <div class="file-info">
       <div class="file-name">${escHtml(file.filename || "")}</div>
       <div class="file-meta">
-        <span class="agent-badge badge-${file.agent}" style="font-size:9px;padding:1px 4px">${(AGENT_META[file.agent] || {label: file.agent}).label}</span>
+        <span class="agent-badge badge-${file.agent}" style="font-size:9px;padding:1px 4px">${(_metaFor(file.agent)).label}</span>
         ${escHtml(sizeStr)} · ${escHtml(timeStr)}
         ${cardChip}
       </div>
@@ -1380,7 +1626,7 @@ function openFileViewer(path, agent) {
 
   fname.textContent = filename;
   badge.className = `agent-badge badge-${agent}`;
-  badge.textContent = (AGENT_META[agent] || { label: agent }).label;
+  badge.textContent = (_metaFor(agent)).label;
   meta.textContent = "";
   dl.href = `/api/file?path=${encodeURIComponent(path)}`;
   dl.download = filename;
@@ -1459,7 +1705,7 @@ function openLogViewer(ev, rowEl) {
   const existing = document.getElementById("log-popover");
   if (existing) { existing.remove(); return; }
 
-  const agentMeta = AGENT_META[ev.agent] || { label: ev.agent.toUpperCase() };
+  const agentMeta = _metaFor(ev.agent);
   const kindLabel = (ev.kind || "").replace(/_/g, " ");
   const text = ev.full || "";
   const isMarkdown = ev.kind === "response" || ev.kind === "delegation" || ev.kind === "subagent_result";
@@ -1750,3 +1996,292 @@ function escHtml(str) {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;");
 }
+
+// ── Info / header pills ─────────────────────────────────────────────────────
+async function loadInfo() {
+  try {
+    const info = await fetch('/api/info').then(r => r.json());
+    const dirEl = document.getElementById('hermes-dir-pill');
+    if (dirEl) {
+      const dir = info.hermes_dir || '';
+      const short = dir.length > 36 ? '…' + dir.slice(-33) : dir;
+      dirEl.textContent = short;
+      dirEl.title = 'Click to copy: ' + dir;
+      dirEl.onclick = () => {
+        navigator.clipboard?.writeText(dir);
+        dirEl.textContent = '✓ copied';
+        setTimeout(() => { dirEl.textContent = short; }, 1200);
+      };
+    }
+    const gwEl = document.getElementById('gateway-pill');
+    if (gwEl) {
+      gwEl.textContent = info.docker_container
+        ? info.orchestrator + '@' + info.docker_container
+        : info.orchestrator || '';
+    }
+  } catch (e) { /* ignore */ }
+}
+loadInfo();
+setInterval(loadInfo, 30000);
+
+// ── Settings panel ───────────────────────────────────────────────────────────
+function openSettings()  {
+  document.getElementById('settings-panel').classList.add('sp-open');
+  document.getElementById('settings-overlay').classList.add('sp-open');
+  loadSettingsValues();
+}
+function closeSettings() {
+  document.getElementById('settings-panel').classList.remove('sp-open');
+  document.getElementById('settings-overlay').classList.remove('sp-open');
+}
+function toggleSettings() {
+  const open = document.getElementById('settings-panel').classList.contains('sp-open');
+  open ? closeSettings() : openSettings();
+}
+
+function switchSettingsTab(tab) {
+  document.querySelectorAll('#settings-tabs-bar .stab').forEach(btn => {
+    btn.classList.toggle('stab-active', btn.dataset.tab === tab);
+  });
+  ['connection','monitoring','backup','data','panels'].forEach(t => {
+    const el = document.getElementById('stab-' + t);
+    if (el) el.style.display = t === tab ? 'block' : 'none';
+  });
+}
+
+async function loadSettingsValues() {
+  // Load connection/monitoring/backup/data from server
+  try {
+    const s = await fetch('/api/settings').then(r => r.json());
+
+    // Connection
+    _setVal('cfg-hermes-dir',   s.hermes_dir     || '');
+    _setVal('cfg-orchestrator', s.orchestrator   || '');
+    _setVal('cfg-docker',       s.docker_container || '');
+    _setVal('cfg-port',         s.webui_port     || 7979);
+    _setVal('cfg-extra-home',   s.extra_home     || '');
+
+    // Monitoring
+    _setVal('cfg-trace-mode',    s.trace_mode    || 'milestones');
+    _setVal('cfg-slack-channel', s.slack_trace_channel || '');
+    _setVal('cfg-warmup',        s.warmup_freshness || 21600);
+
+    // Status chip for monitoring tab
+    const traceChip = document.getElementById('sfield-trace-chip');
+    if (traceChip) {
+      if (s.trace_enabled) {
+        traceChip.innerHTML = `<div class="s-chip s-chip-ok">✓ Trace active — posting to <code>${s.slack_trace_channel || '?'}</code></div>`;
+      } else if (s.slack_trace_channel) {
+        traceChip.innerHTML = `<div class="s-chip s-chip-warn">⚠ Channel set but SLACK_BOT_TOKEN missing in ${_shortDir(s.hermes_dir)}/.env</div>`;
+      } else {
+        traceChip.innerHTML = `<div class="s-chip s-chip-off">○ Trace disabled — set channel + token to enable</div>`;
+      }
+    }
+
+    // Backup
+    _setVal('cfg-backup-repo',   s.backup_repo   || '');
+    _setVal('cfg-backup-script', s.backup_script || '');
+
+    // Status chip for backup tab
+    const backupChip = document.getElementById('sfield-backup-chip');
+    if (backupChip) {
+      if (s.backup_configured) {
+        backupChip.innerHTML = `<div class="s-chip s-chip-ok">✓ Backup configured</div>`;
+      } else if (s.backup_repo) {
+        backupChip.innerHTML = `<div class="s-chip s-chip-warn">⚠ Repo set but script missing or not found</div>`;
+      } else {
+        backupChip.innerHTML = `<div class="s-chip s-chip-off">○ Not configured — set repo and script paths</div>`;
+      }
+    }
+
+    // Data
+    _setVal('cfg-vector-db',    s.vector_db_url     || '');
+    _setVal('cfg-files-age',    s.files_max_age_days || 14);
+    _setVal('cfg-files-count',  s.files_max_entries  || 80);
+
+  } catch (e) {
+    console.warn('loadSettingsValues failed:', e);
+  }
+
+  // Panels tab — read from localStorage
+  const prefs = _getPrefs();
+  _setChecked('toggle-dark',    prefs.dark    || false);
+  _setChecked('toggle-compact', prefs.compact || false);
+  ['usage','backup','traces','activity','files','cron'].forEach(p => {
+    _setChecked('panel-' + p, prefs['panel_' + p] !== false);
+  });
+}
+
+function _setVal(id, val) {
+  const el = document.getElementById(id);
+  if (el) el.value = val;
+}
+function _setChecked(id, val) {
+  const el = document.getElementById(id);
+  if (el) el.checked = val;
+}
+function _shortDir(dir) {
+  if (!dir) return '~/.hermes';
+  return dir.length > 30 ? '…' + dir.slice(-27) : dir;
+}
+
+async function saveSettings(tab) {
+  const statusEl = document.getElementById('status-' + tab);
+  if (statusEl) { statusEl.textContent = 'Saving…'; statusEl.className = 'sfield-status'; }
+
+  const FIELDS = {
+    connection: () => ({
+      hermes_dir:       document.getElementById('cfg-hermes-dir')?.value   || '',
+      orchestrator:     document.getElementById('cfg-orchestrator')?.value  || '',
+      docker_container: document.getElementById('cfg-docker')?.value        || '',
+      webui_port:       parseInt(document.getElementById('cfg-port')?.value || 7979),
+      extra_home:       document.getElementById('cfg-extra-home')?.value    || '',
+    }),
+    monitoring: () => ({
+      trace_mode:         document.getElementById('cfg-trace-mode')?.value    || 'milestones',
+      slack_trace_channel:document.getElementById('cfg-slack-channel')?.value || '',
+      warmup_freshness:   parseInt(document.getElementById('cfg-warmup')?.value || 21600),
+    }),
+    backup: () => ({
+      backup_repo:   document.getElementById('cfg-backup-repo')?.value   || '',
+      backup_script: document.getElementById('cfg-backup-script')?.value || '',
+    }),
+    data: () => ({
+      vector_db_url:      document.getElementById('cfg-vector-db')?.value     || '',
+      files_max_age_days: parseInt(document.getElementById('cfg-files-age')?.value   || 14),
+      files_max_entries:  parseInt(document.getElementById('cfg-files-count')?.value || 80),
+    }),
+  };
+
+  const getter = FIELDS[tab];
+  if (!getter) return;
+
+  try {
+    const r = await fetch('/api/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(getter()),
+    }).then(r => r.json());
+
+    if (r.ok) {
+      if (statusEl) { statusEl.textContent = '✓ Saved — restart the server to apply changes'; statusEl.className = 'sfield-status ok'; }
+    } else {
+      if (statusEl) { statusEl.textContent = '✗ Error: ' + (r.error || 'unknown'); statusEl.className = 'sfield-status err'; }
+    }
+  } catch (e) {
+    if (statusEl) { statusEl.textContent = '✗ Request failed: ' + e; statusEl.className = 'sfield-status err'; }
+  }
+}
+
+// ── Appearance ───────────────────────────────────────────────────────────────
+function _getPrefs() {
+  try { return JSON.parse(localStorage.getItem('hermes-prefs') || '{}'); } catch (_) { return {}; }
+}
+function _savePrefs(prefs) {
+  localStorage.setItem('hermes-prefs', JSON.stringify(prefs));
+}
+
+function applyAppearance() {
+  const prefs = _getPrefs();
+  prefs.dark    = document.getElementById('toggle-dark')?.checked    || false;
+  prefs.compact = document.getElementById('toggle-compact')?.checked || false;
+  _savePrefs(prefs);
+  document.body.classList.toggle('dark-mode',    prefs.dark);
+  document.body.classList.toggle('compact-mode', prefs.compact);
+}
+
+function applyPanelVisibility() {
+  const prefs = _getPrefs();
+  const PANEL_MAP = {
+    usage:    '#usage-panel',
+    backup:   '#backup-panel',
+    traces:   '#prompt-trace-panel',
+    activity: '#activity-panel',
+    files:    '#files-panel',
+    cron:     '#cron-panel',
+  };
+  ['usage','backup','traces','activity','files','cron'].forEach(p => {
+    const cb = document.getElementById('panel-' + p);
+    const visible = cb ? cb.checked : true;
+    prefs['panel_' + p] = visible;
+    const sel = PANEL_MAP[p];
+    if (sel) {
+      document.querySelectorAll(sel).forEach(el => {
+        el.style.display = visible ? '' : 'none';
+      });
+    }
+  });
+  _savePrefs(prefs);
+}
+
+// Restore appearance + panel visibility on every page load
+(function restorePrefsOnLoad() {
+  const prefs = _getPrefs();
+  if (prefs.dark)    document.body.classList.add('dark-mode');
+  if (prefs.compact) document.body.classList.add('compact-mode');
+  const PANEL_MAP = {
+    usage:    '#usage-panel',
+    backup:   '#backup-panel',
+    traces:   '#prompt-trace-panel',
+    activity: '#activity-panel',
+    files:    '#files-panel',
+    cron:     '#cron-panel',
+  };
+  ['usage','backup','traces','activity','files','cron'].forEach(p => {
+    if (prefs['panel_' + p] === false) {
+      const sel = PANEL_MAP[p];
+      if (sel) document.querySelectorAll(sel).forEach(el => { el.style.display = 'none'; });
+    }
+  });
+})();
+
+// ── Cron jobs panel ──────────────────────────────────────────────────────────
+async function loadCronJobs() {
+  const tbody = document.getElementById('cron-tbody');
+  if (!tbody) return;
+  try {
+    const { jobs } = await fetch('/api/cron').then(r => r.json());
+    if (!jobs || !jobs.length) {
+      tbody.innerHTML = '<tr><td colspan="7" class="cron-empty">No cron jobs configured</td></tr>';
+      return;
+    }
+    function fmtTime(v) {
+      if (!v) return '—';
+      try { return new Date(v).toLocaleString(undefined, {month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}); }
+      catch (_) { return v; }
+    }
+    tbody.innerHTML = jobs.map(j => {
+      const isPaused = j.paused === 1 || j.paused === true || j.status === 'paused';
+      const dot = isPaused
+        ? `<span style="color:var(--dim)">⏸</span>`
+        : `<span style="color:var(--accent-g)">●</span>`;
+      const toggleBtn = isPaused
+        ? `<button class="cron-btn cron-btn-resume" onclick="cronAction('${j.id}','resume')">▶ Resume</button>`
+        : `<button class="cron-btn cron-btn-pause"  onclick="cronAction('${j.id}','pause')">❙❙ Pause</button>`;
+      return `<tr>
+        <td>${escHtml(j.name || j.id || '—')}</td>
+        <td><span class="cron-sched">${escHtml(j.schedule || j.cron_expression || j.cron || '—')}</span></td>
+        <td>${escHtml(j.profile || j.assignee || j.agent || '—')}</td>
+        <td>${dot} ${isPaused ? 'paused' : 'active'}</td>
+        <td>${fmtTime(j.last_run || j.last_run_at)}</td>
+        <td>${fmtTime(j.next_run || j.next_run_at)}</td>
+        <td style="white-space:nowrap">
+          <button class="cron-btn cron-btn-run" onclick="cronAction('${j.id}','run')">▷ Run</button>
+          ${toggleBtn}
+        </td>
+      </tr>`;
+    }).join('');
+  } catch (e) {
+    tbody.innerHTML = '<tr><td colspan="7" class="cron-empty" style="color:var(--accent-r)">Failed to load cron jobs</td></tr>';
+  }
+}
+
+async function cronAction(id, action) {
+  try {
+    const r = await fetch(`/api/cron/${id}/${action}`, { method: 'POST' }).then(r => r.json());
+    if (r.ok) { loadCronJobs(); }
+    else { alert(`Cron ${action} failed: ${r.msg || r.error || 'unknown error'}`); }
+  } catch (e) { alert('Request failed: ' + e); }
+}
+
+loadCronJobs();

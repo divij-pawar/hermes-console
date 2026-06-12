@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Hermes Web UI - Activity Monitor Server
-Serves a dashboard for monitoring Hermes agent activity (Sage, Imagine, future
+"""Hermes Web UI - Console Server
+Serves a control panel dashboard for Hermes agent activity (Sage, Imagine, future
 specialists). Watches per-profile session jsonl files, output directories, and
 the shared gateway log. Uses only Python stdlib — no pip deps required.
 
@@ -25,16 +25,42 @@ import time
 import urllib.parse
 from pathlib import Path
 
+
+# ── .env bootstrap ─────────────────────────────────────────────────────────────
+# Load .env (and .env.local for local overrides) from the web-ui directory
+# before reading any os.environ.get() calls. Shell environment always wins —
+# values already set in the environment are never overwritten.
+def _bootstrap_env() -> None:
+    _dir = os.path.dirname(os.path.abspath(__file__))
+    for _name in (".env", ".env.local"):
+        _path = os.path.join(_dir, _name)
+        try:
+            with open(_path, encoding="utf-8") as _f:
+                for _raw in _f:
+                    _line = _raw.strip()
+                    if not _line or _line.startswith("#") or "=" not in _line:
+                        continue
+                    _key, _val = _line.split("=", 1)
+                    _key = _key.strip()
+                    _val = _val.strip().strip("'\"")
+                    if _key and _key not in os.environ:
+                        os.environ[_key] = _val
+        except OSError:
+            pass
+
+_bootstrap_env()
+
 # ── Paths ──────────────────────────────────────────────────────────────────────
-HERMES_DIR    = os.path.expanduser("~/.hermes")
+HERMES_DIR         = os.environ.get("HERMES_DIR", os.path.expanduser("~/.hermes"))
+HERMES_ORCHESTRATOR = os.environ.get("HERMES_ORCHESTRATOR", "sage")
 PROFILES_DIR  = os.path.join(HERMES_DIR, "profiles")
 WORKSPACE_DIR = os.path.join(HERMES_DIR, "workspace")
 LOGS_DIR      = os.path.join(HERMES_DIR, "logs")
 KANBAN_DB     = os.path.join(HERMES_DIR, "kanban.db")
 KANBAN_LOGS   = os.path.join(HERMES_DIR, "kanban", "logs")
 SCRIPT_DIR    = os.path.dirname(os.path.abspath(__file__))
-MONITOR_DB    = os.path.join(SCRIPT_DIR, "monitor.db")
-_DEFAULT_BACKUP_REPO = os.path.expanduser("~/Documents/sf_agents")
+MONITOR_DB    = os.environ.get("HERMES_MONITOR_DB", os.path.join(SCRIPT_DIR, "monitor.db"))
+_DEFAULT_BACKUP_REPO = ""  # no hardcoded fallback — only resolve if configured in HERMES_DIR
 _SF_AGENTS_REPO_FILE = os.path.join(HERMES_DIR, ".sf_agents_repo")
 
 
@@ -67,44 +93,105 @@ def _resolve_backup_paths() -> tuple[str, str]:
 
 
 BACKUP_REPO, BACKUP_SCRIPT = _resolve_backup_paths()
-GATEWAY_LOG   = os.path.join(LOGS_DIR, "gateway.log")
-IMAGINE_GATEWAY_LOG = os.path.join(PROFILES_DIR, "imagine", "logs", "gateway.log")
-SAGE_AGENT_LOG = os.path.join(LOGS_DIR, "agent.log")
-IMAGINE_AGENT_LOG = os.path.join(PROFILES_DIR, "imagine", "logs", "agent.log")
-RECON_GATEWAY_LOG = os.path.join(PROFILES_DIR, "recon", "logs", "gateway.log")
-SIGNAL_GATEWAY_LOG = os.path.join(PROFILES_DIR, "signal", "logs", "gateway.log")
-RECON_AGENT_LOG = os.path.join(PROFILES_DIR, "recon", "logs", "agent.log")
-SIGNAL_AGENT_LOG = os.path.join(PROFILES_DIR, "signal", "logs", "agent.log")
-INK_AGENT_LOG = os.path.join(PROFILES_DIR, "ink", "logs", "agent.log")
+# ── Agent metadata & discovery ─────────────────────────────────────────────
 
-# Per-agent live log sources. The gateway log carries inbound user messages;
-# the agent log carries per-tool, per-API-call entries in real time. Tailing
-# these lets the activity feed reflect what's happening NOW instead of waiting
-# for the per-turn session jsonl batch write.
-AGENT_LIVE_LOGS = {
-    "sage":    {"gateway": GATEWAY_LOG,          "agent": SAGE_AGENT_LOG},
-    "imagine": {"gateway": IMAGINE_GATEWAY_LOG,  "agent": IMAGINE_AGENT_LOG},
-    "recon":   {"gateway": RECON_GATEWAY_LOG,    "agent": RECON_AGENT_LOG},
-    "signal":  {"gateway": SIGNAL_GATEWAY_LOG,   "agent": SIGNAL_AGENT_LOG},
-    "ink":     {"agent": INK_AGENT_LOG},
+# Well-known agents get fixed colors and emojis. Any agent discovered in
+# profiles/ but not listed here gets the next entry from _AGENT_PALETTE.
+_KNOWN_AGENT_META: dict[str, dict] = {
+    "sage":    {"emoji": "🧭", "color": "#58a6ff", "label": "SAGE"},
+    "imagine": {"emoji": "🎨", "color": "#bc8cff", "label": "IMAGINE"},
+    "ink":     {"emoji": "🖊️",  "color": "#3fb950", "label": "INK"},
+    "recon":   {"emoji": "🔎", "color": "#f0883e", "label": "RECON"},
+    "signal":  {"emoji": "📡", "color": "#79c0ff", "label": "SIGNAL"},
+    "anton":   {"emoji": "🔨", "color": "#e3b341", "label": "ANTON"},
 }
-STATIC_DIR    = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
-PORT          = int(os.environ.get("PORT") or os.environ.get("HERMES_WEBUI_PORT", "7979"))
+_AGENT_PALETTE = [
+    ("#a5d6ff", "⚡"), ("#f778ba", "🔬"), ("#56d364", "🎯"),
+    ("#ff7b72", "💡"), ("#ffa657", "🛠️"), ("#d2a8ff", "🌐"),
+]
 
-# Sage runs in the default profile (HERMES_DIR itself). Named profiles live
-# under PROFILES_DIR/<name>/. Add new specialists here as they come online.
-AGENT_IDS     = ["sage", "imagine", "ink", "recon", "signal"]
 
-# Per-agent paths. Sage uses the default-profile root; named profiles namespace
-# under profiles/<id>/. Output dirs are shared under workspace/<id>/output/.
+def _discover_agents(hermes_dir: str) -> list[str]:
+    """Return agent IDs present in *hermes_dir*.
+
+    Always includes the orchestrator (HERMES_ORCHESTRATOR, default "sage") as
+    the default-profile root. Any subdirectory found under profiles/ is added.
+    """
+    agents = [HERMES_ORCHESTRATOR]
+    profiles = os.path.join(hermes_dir, "profiles")
+    if os.path.isdir(profiles):
+        for name in sorted(os.listdir(profiles)):
+            if os.path.isdir(os.path.join(profiles, name)) and name not in agents:
+                agents.append(name)
+    return agents
+
+
+def _agent_log_paths(agent_id: str, hermes_dir: str) -> dict[str, str]:
+    """Return {gateway: path, agent: path} for *agent_id* inside *hermes_dir*."""
+    if agent_id == HERMES_ORCHESTRATOR:
+        logs = os.path.join(hermes_dir, "logs")
+    else:
+        logs = os.path.join(hermes_dir, "profiles", agent_id, "logs")
+    return {
+        "gateway": os.path.join(logs, "gateway.log"),
+        "agent":   os.path.join(logs, "agent.log"),
+    }
+
+
+# ── Primary + extra Hermes homes ───────────────────────────────────────────
+
+# _AGENT_HOME_MAP overrides which hermes_dir to use for agents sourced from
+# HERMES_EXTRA_HOME (e.g. the Docker lab bind-mount on the host).
+_AGENT_HOME_MAP: dict[str, str] = {}
+
+AGENT_IDS: list[str] = _discover_agents(HERMES_DIR)
+
+# Set HERMES_EXTRA_HOME to watch a second Hermes home alongside the primary.
+# Example: HERMES_EXTRA_HOME=/tmp/hermes-anton-lab/home
+HERMES_EXTRA_HOME = os.environ.get("HERMES_EXTRA_HOME", "").strip()
+if HERMES_EXTRA_HOME and os.path.isdir(HERMES_EXTRA_HOME):
+    for _eid in _discover_agents(HERMES_EXTRA_HOME):
+        if _eid not in AGENT_IDS:          # never shadow a primary-home agent
+            AGENT_IDS.append(_eid)
+            _AGENT_HOME_MAP[_eid] = HERMES_EXTRA_HOME
+
+
+def _agent_home(agent_id: str) -> str:
+    """Return the Hermes home directory for *agent_id*."""
+    return _AGENT_HOME_MAP.get(agent_id, HERMES_DIR)
+
+
 def _agent_root(agent_id: str) -> str:
-    if agent_id == "sage":
+    """Return the profile root directory for *agent_id*."""
+    home = _agent_home(agent_id)
+    if agent_id == HERMES_ORCHESTRATOR and home == HERMES_DIR:
         return HERMES_DIR
-    return os.path.join(PROFILES_DIR, agent_id)
+    if agent_id == HERMES_ORCHESTRATOR:
+        return home
+    return os.path.join(home, "profiles", agent_id)
+
+
+# Per-agent live log sources. Built from AGENT_IDS so any newly discovered
+# profile is included automatically — no manual edits needed.
+AGENT_LIVE_LOGS: dict[str, dict[str, str]] = {
+    aid: _agent_log_paths(aid, _agent_home(aid))
+    for aid in AGENT_IDS
+}
+
+# Alias for the primary gateway log — keyed off the configured orchestrator.
+GATEWAY_LOG = AGENT_LIVE_LOGS[HERMES_ORCHESTRATOR]["gateway"]
+
+STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+PORT       = int(os.environ.get("PORT") or os.environ.get("HERMES_WEBUI_PORT", "7979"))
+
+
+def _agent_output_dir(agent_id: str) -> str:
+    home = _agent_home(agent_id)
+    return os.path.join(home, "workspace", agent_id, "output")
 
 
 AGENT_OUTPUT_DIRS: dict[str, str] = {
-    aid: os.path.join(WORKSPACE_DIR, aid, "output")
+    aid: _agent_output_dir(aid)
     for aid in AGENT_IDS
 }
 
@@ -403,7 +490,7 @@ def _session_prompt_trace_fallback() -> list[dict]:
         msg = r["detail"] or "Slack prompt"
         traces.append({
             "id": f"session:{r['prompt_id']}",
-            "agent": r["agent"] or "sage",
+            "agent": r["agent"] or HERMES_ORCHESTRATOR,
             "platform": "slack",
             "user": "",
             "chat": "",
@@ -704,6 +791,36 @@ def _credit_api_call(agent_id: str, in_tok: int, out_tok: int,
     })
 
 
+def _agent_metadata_list() -> list[dict]:
+    """Return metadata for every discovered agent — consumed by /api/agents.
+
+    Well-known agents get fixed colors/emojis from _KNOWN_AGENT_META. Newly
+    discovered agents get the next slot from _AGENT_PALETTE so the UI never
+    renders a plain grey dot for an unknown worker.
+    """
+    result = []
+    palette_idx = 0
+    for aid in AGENT_IDS:
+        meta = _KNOWN_AGENT_META.get(aid)
+        if meta:
+            color = meta["color"]
+            emoji = meta["emoji"]
+            label = meta["label"]
+        else:
+            color, emoji = _AGENT_PALETTE[palette_idx % len(_AGENT_PALETTE)]
+            label = aid.upper()
+            palette_idx += 1
+        result.append({
+            "id":       aid,
+            "label":    label,
+            "emoji":    emoji,
+            "color":    color,
+            "root":     _agent_root(aid),
+            "is_extra": aid in _AGENT_HOME_MAP,
+        })
+    return result
+
+
 def usage_snapshot() -> dict:
     """Snapshot used by /api/usage."""
     with prompt_usage_lock:
@@ -718,18 +835,48 @@ def usage_snapshot() -> dict:
     }
 
 
+def _active_providers() -> list[str]:
+    """Return provider names that are configured or have historical events in monitor.db."""
+    configured = set()
+    _KEY_MAP = {
+        "OPENROUTER_API_KEY": "openrouter",
+        "XAI_API_KEY": "x",
+        "TAVILY_API_KEY": "tavily",
+    }
+    for env_key, provider in _KEY_MAP.items():
+        if _read_hermes_env_value(env_key):
+            configured.add(provider)
+    # Also include any provider that already has events recorded (don't hide history)
+    try:
+        with monitor_db_lock:
+            conn = _monitor_conn()
+            rows = conn.execute(
+                "SELECT DISTINCT provider FROM usage_events"
+            ).fetchall()
+            conn.close()
+        for r in rows:
+            if r["provider"]:
+                configured.add(r["provider"])
+    except Exception:
+        pass
+    # Preserve a stable display order
+    return [p for p in ("openrouter", "x", "tavily") if p in configured]
+
+
 def _usage_provider_snapshot() -> dict:
     cutoff = _today_cutoff()
-    empty = {
-        "openrouter": {"calls_today": 0, "input_today": 0, "output_today": 0, "cache_read_today": 0, "estimated_cost_today": 0.0, "recent": [], "models": []},
-        "x": {"calls_today": 0, "usage_units_today": 0, "recent": [], "failures_today": 0},
-        "tavily": {"calls_today": 0, "usage_units_today": 0, "recent": [], "failures_today": 0},
-    }
+    providers = _active_providers()
+    empty: dict = {}
+    for p in providers:
+        if p == "openrouter":
+            empty[p] = {"calls_today": 0, "input_today": 0, "output_today": 0, "cache_read_today": 0, "estimated_cost_today": 0.0, "recent": [], "models": []}
+        else:
+            empty[p] = {"calls_today": 0, "usage_units_today": 0, "recent": [], "failures_today": 0}
     try:
         with monitor_db_lock:
             conn = _monitor_conn()
             cur = conn.cursor()
-            for provider in ("openrouter", "x", "tavily"):
+            for provider in providers:
                 row = cur.execute(
                     """
                     SELECT COUNT(*) AS calls,
@@ -978,7 +1125,9 @@ _trace_milestone_seen: set[tuple[str, str]] = set()
 _trace_incident_seen: dict[str, float] = {}
 _memory_search_pending: dict[str, str] = {}  # tool_call_id → query label
 _INCIDENT_DEDUPE_TTL_S = 300
-_AGENT_EMOJI = {"sage": "🧭", "imagine": "🎨", "ink": "🖊️", "recon": "🔎", "signal": "📡"}
+def _agent_emoji(agent_id: str) -> str:
+    meta = _KNOWN_AGENT_META.get(agent_id)
+    return meta["emoji"] if meta else "•"
 # local_path (realpath) → presigned S3 URL, populated from s3_upload tool results
 _s3_url_by_local_path: dict[str, str] = {}
 
@@ -1213,7 +1362,7 @@ def _format_done_milestone(card: dict, detail: dict | None) -> str:
     tid = card.get("id", "?")
     assignee = card.get("assignee") or "?"
     title = (card.get("title") or "")[:80]
-    em = _AGENT_EMOJI.get(assignee, "•")
+    em = _agent_emoji(assignee)
     head = f"✅ {em} `{assignee}` · `{tid}` done · _{title}_"
     lines = [head]
     if detail:
@@ -1290,7 +1439,7 @@ def _trace_done_incidents(card: dict, detail: dict | None) -> None:
 def _trace_milestone_inbound(agent_id: str, msg: str, platform: str, chat: str) -> None:
     if _trace_verbose():
         return
-    em = _AGENT_EMOJI.get(agent_id, "•")
+    em = _agent_emoji(agent_id)
     snippet = (msg or "").replace("\n", " ")[:120]
     chan = chat if chat else platform or "?"
     trace(f"{em} `{agent_id}` · user in `{chan}` · \"{snippet}\"")
@@ -1301,7 +1450,7 @@ def _trace_milestone_delivered(
 ) -> None:
     if _trace_verbose():
         return
-    em = _AGENT_EMOJI.get(agent_id, "•")
+    em = _agent_emoji(agent_id)
     trace(
         f"{em} `{agent_id}` · delivered to front · {response_chars:,} chars · "
         f"{api_calls} API calls · {elapsed_s:.1f}s"
@@ -1358,7 +1507,7 @@ def _trace_milestone_memory_search(
     dedupe_key = (session_id or "?", f"mem:{query_label[:80]}")
     if _trace_dedupe_milestone(dedupe_key):
         return
-    em = _AGENT_EMOJI.get(agent_id, "•")
+    em = _agent_emoji(agent_id)
     hit_s = f"{hits} hit(s)" if hits is not None else "done"
     top_s = f" · top {top_pct}%" if top_pct is not None else ""
     trace(
@@ -1552,7 +1701,7 @@ def register_file(agent_id: str, path: str, broadcast_event: bool = True) -> boo
         broadcast({"type": "file_event", **entry})
         if _trace_verbose():
             size_kb = max(1, size // 1024)
-            em = _AGENT_EMOJI.get(agent_id, "•")
+            em = _agent_emoji(agent_id)
             trace(f"{em} `{agent_id}` · wrote `{entry['filename']}` ({size_kb} KB)")
     return True
 
@@ -1630,6 +1779,124 @@ def _kanban_conn():
         return None
 
 
+def _kanban_conn_rw():
+    try:
+        return sqlite3.connect(KANBAN_DB, timeout=2.0, check_same_thread=False)
+    except sqlite3.Error:
+        return None
+
+
+def _kanban_task_status(task_id: str) -> str | None:
+    conn = _kanban_conn()
+    if not conn:
+        return None
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT status FROM tasks WHERE id = ?", (task_id,))
+        row = cur.fetchone()
+        return row[0] if row else None
+    except sqlite3.Error:
+        return None
+    finally:
+        conn.close()
+
+
+def _hermes_kanban_run(*args: str) -> tuple[bool, str]:
+    """Run a hermes kanban subcommand. Returns (success, combined output).
+
+    Hermes often exits 0 even when it prints 'cannot ...' — treat that as failure.
+    """
+    try:
+        cp = subprocess.run(
+            ["hermes", "kanban", *args],
+            capture_output=True, text=True, timeout=10,
+            env=os.environ,
+        )
+    except Exception as exc:
+        return False, str(exc)
+    out = ((cp.stdout or "") + (cp.stderr or "")).strip()
+    if cp.returncode != 0:
+        return False, out
+    lower = out.lower()
+    if any(p in lower for p in ("cannot ", "no such task", "unknown id", "not found")):
+        return False, out
+    return True, out
+
+
+def _kanban_archive_direct(task_id: str, prev_status: str | None = None) -> dict:
+    """Archive a task directly in kanban.db when the hermes CLI cannot."""
+    conn = _kanban_conn_rw()
+    if not conn:
+        return {"ok": False, "error": "kanban.db unavailable"}
+    try:
+        cur = conn.cursor()
+        if prev_status is None:
+            cur.execute("SELECT status FROM tasks WHERE id = ?", (task_id,))
+            row = cur.fetchone()
+            if not row:
+                return {"ok": False, "error": f"task {task_id} not found"}
+            prev_status = row[0]
+        if prev_status == "archived":
+            return {"ok": True, "archived": task_id, "method": "direct", "noop": True}
+        now = int(time.time())
+        cur.execute(
+            "UPDATE tasks SET status='archived', claim_lock=NULL, claim_expires=NULL, "
+            "worker_pid=NULL, current_run_id=NULL "
+            "WHERE id = ? AND status != 'archived'",
+            (task_id,),
+        )
+        if cur.rowcount == 0:
+            return {"ok": False, "error": f"task {task_id} not found or already archived"}
+        cur.execute(
+            "INSERT INTO task_events (task_id, kind, payload, created_at) VALUES (?, ?, ?, ?)",
+            (task_id, "archived", json.dumps({"source": "hermes-monitor", "prev_status": prev_status}), now),
+        )
+        conn.commit()
+        return {"ok": True, "archived": task_id, "method": "direct"}
+    except sqlite3.Error as exc:
+        return {"ok": False, "error": str(exc)}
+    finally:
+        conn.close()
+
+
+def _kanban_reclaim_direct(task_id: str) -> bool:
+    """Release an active worker claim directly in kanban.db."""
+    conn = _kanban_conn_rw()
+    if not conn:
+        return False
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE tasks SET claim_lock=NULL, claim_expires=NULL, worker_pid=NULL, "
+            "current_run_id=NULL WHERE id = ? AND status = 'running'",
+            (task_id,),
+        )
+        changed = cur.rowcount > 0
+        if changed:
+            cur.execute(
+                "INSERT INTO task_events (task_id, kind, payload, created_at) VALUES (?, ?, ?, ?)",
+                (task_id, "reclaimed", json.dumps({"source": "hermes-monitor"}), int(time.time())),
+            )
+        conn.commit()
+        return changed
+    except sqlite3.Error:
+        return False
+    finally:
+        conn.close()
+
+
+def _kanban_refresh_after_change(task_id: str) -> None:
+    try:
+        with kanban_snapshot_lock:
+            kanban_snapshot.pop(task_id, None)
+        _resolve_prefix(f"task_blocked:{task_id}")
+        _resolve_prefix(f"stalled_task:{task_id}")
+        board = kanban_board_summary()
+        broadcast({"type": "kanban_board", **board})
+    except Exception:
+        pass
+
+
 def kanban_board_summary(limit_done: int = 30) -> dict:
     """Return the active board: every ready/running/blocked card plus the most
     recent `limit_done` finished ones. Shape is small enough to ship over SSE
@@ -1698,9 +1965,44 @@ AGENT_LAUNCHD_LABELS = {
     "imagine": "ai.hermes.gateway-imagine",
 }
 
+# When HERMES_DOCKER_CONTAINER is set the monitor routes all agent lifecycle
+# actions to `docker start/stop/restart <container>` instead of launchctl.
+# Set this in start-lab.sh when the gateway runs inside Docker.
+DOCKER_CONTAINER = os.environ.get("HERMES_DOCKER_CONTAINER", "").strip()
+
+
+def _get_worker_pids(agent_id: str) -> list[int]:
+    """Return PIDs of in-progress kanban workers for agent_id (Docker mode only)."""
+    db_path = os.path.join(HERMES_DIR, "kanban.db")
+    if not os.path.exists(db_path):
+        return []
+    try:
+        conn = sqlite3.connect(db_path, timeout=2)
+        rows = conn.execute(
+            "SELECT worker_pid FROM tasks "
+            "WHERE status='in_progress' AND assignee=? AND worker_pid IS NOT NULL",
+            (agent_id,)
+        ).fetchall()
+        conn.close()
+        return [int(r[0]) for r in rows if r[0]]
+    except Exception:
+        return []
+
 
 def _agent_running(agent_id: str) -> bool:
-    """Return True if the agent's launchd service is currently loaded."""
+    """Return True if the agent's gateway is currently running."""
+    if DOCKER_CONTAINER:
+        if agent_id == HERMES_ORCHESTRATOR:
+            try:
+                cp = subprocess.run(
+                    ["docker", "inspect", "--format", "{{.State.Running}}", DOCKER_CONTAINER],
+                    capture_output=True, text=True, timeout=5,
+                )
+                return cp.returncode == 0 and cp.stdout.strip() == "true"
+            except Exception:
+                return False
+        else:
+            return len(_get_worker_pids(agent_id)) > 0
     label = AGENT_LAUNCHD_LABELS.get(agent_id)
     if not label:
         return False
@@ -1715,10 +2017,55 @@ def _agent_running(agent_id: str) -> bool:
 
 
 def agent_lifecycle(agent_id: str, action: str) -> dict:
-    """start / stop / restart an agent's launchd gateway.
+    """start / stop / restart an agent's gateway.
 
-    Pure workers (no plist registered) return 400. Unknown agent → 404.
+    In Docker mode (HERMES_DOCKER_CONTAINER set) all actions route to
+    `docker start/stop/restart`. Otherwise uses launchd plists.
+    Pure workers (no gateway) return 400. Unknown agent → 404.
     """
+    if action not in ("start", "stop", "restart"):
+        return {"ok": False, "error": f"unknown action: {action}"}
+
+    def _run(cmd: list[str], timeout: int = 15) -> tuple[int, str]:
+        try:
+            cp = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+            return cp.returncode, (cp.stderr or cp.stdout).strip()
+        except Exception as exc:
+            return 1, str(exc)
+
+    # ── Docker mode ───────────────────────────────────────────────────────────
+    if DOCKER_CONTAINER:
+        if agent_id == HERMES_ORCHESTRATOR:
+            rc, msg = _run(["docker", action, DOCKER_CONTAINER])
+            if rc != 0:
+                return {"ok": False, "message": msg}
+            try:
+                broadcast({"type": "agent_status", "agent": agent_id, "active": False,
+                           "last_seen": None, "session": None})
+            except Exception:
+                pass
+            return {"ok": True, "action": action, "container": DOCKER_CONTAINER}
+        else:
+            if action == "start":
+                return {"ok": False, "error": (
+                    f"{agent_id} workers are started by the kanban dispatcher — "
+                    "send a task via Slack to dispatch one"
+                )}
+            pids = _get_worker_pids(agent_id)
+            if not pids:
+                return {"ok": True, "action": action,
+                        "note": f"no active {agent_id} workers found"}
+            results = []
+            for pid in pids:
+                rc, _ = _run(["docker", "exec", DOCKER_CONTAINER, "kill", "-TERM", str(pid)])
+                results.append({"pid": pid, "ok": rc == 0})
+            return {
+                "ok": True, "action": action, "container": DOCKER_CONTAINER,
+                "workers_signaled": results,
+                "note": "dispatcher will respawn pending tasks automatically" if action == "restart" else "",
+            }
+
+    # ── launchd mode ─────────────────────────────────────────────────────────
     plist = AGENT_PLISTS.get(agent_id)
     if plist is None:
         if agent_id in AGENT_IDS:
@@ -1730,16 +2077,6 @@ def agent_lifecycle(agent_id: str, action: str) -> dict:
         return {"ok": False, "error": f"unknown agent: {agent_id}"}
     if not os.path.isfile(plist):
         return {"ok": False, "error": f"plist not found at {plist}"}
-
-    if action not in ("start", "stop", "restart"):
-        return {"ok": False, "error": f"unknown action: {action}"}
-
-    def _run(cmd: list[str]) -> tuple[int, str]:
-        try:
-            cp = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
-            return cp.returncode, (cp.stderr or cp.stdout).strip()
-        except Exception as exc:
-            return 1, str(exc)
 
     if action == "start":
         if _agent_running(agent_id):
@@ -1759,7 +2096,6 @@ def agent_lifecycle(agent_id: str, action: str) -> dict:
     rc, msg = _run(["launchctl", "load", plist])
     if rc != 0:
         return {"ok": False, "message": f"reload failed: {msg}"}
-    # Broadcast a status nudge so the UI re-paints
     try:
         broadcast({"type": "agent_status", "agent": agent_id, "active": False,
                    "last_seen": None, "session": None})
@@ -1774,97 +2110,63 @@ def kanban_cancel_one(task_id: str) -> dict:
     For running tasks: reclaim (release the worker claim) first so the
     dispatcher doesn't re-spawn it, then archive.
     For all other states: archive directly.
-    Returns the final result dict.
+    Falls back to direct kanban.db writes when the hermes CLI cannot handle
+    the task (common for blocked cards in Docker lab boards).
     """
     if not task_id or not task_id.startswith("t_"):
         return {"ok": False, "error": "invalid task id"}
 
-    # Check current status
-    conn = _kanban_conn()
-    status = None
-    if conn:
-        try:
-            cur = conn.cursor()
-            cur.execute("SELECT status FROM tasks WHERE id = ?", (task_id,))
-            row = cur.fetchone()
-            if row:
-                status = row[0]
-        except sqlite3.Error:
-            pass
-        finally:
-            conn.close()
-
+    status = _kanban_task_status(task_id)
     if status is None:
         return {"ok": False, "error": f"task {task_id} not found"}
 
-    steps = []
+    steps: list[str] = []
 
-    # Running tasks need their worker claim released first
     if status == "running":
-        try:
-            cp = subprocess.run(
-                ["hermes", "kanban", "reclaim", task_id],
-                capture_output=True, text=True, timeout=10,
-            )
-            if cp.returncode == 0:
-                steps.append("reclaimed")
-            else:
-                steps.append(f"reclaim_warn:{(cp.stderr or cp.stdout).strip()[:80]}")
-        except Exception as exc:
-            steps.append(f"reclaim_err:{exc}")
+        ok, msg = _hermes_kanban_run("reclaim", task_id)
+        if ok:
+            steps.append("reclaimed")
+        elif _kanban_reclaim_direct(task_id):
+            steps.append("reclaimed_direct")
+        elif msg:
+            steps.append(f"reclaim_warn:{msg[:80]}")
 
-    # Archive (works from any status after reclaim)
-    try:
-        cp = subprocess.run(
-            ["hermes", "kanban", "archive", task_id],
-            capture_output=True, text=True, timeout=10,
-        )
-    except Exception as exc:
-        return {"ok": False, "error": str(exc), "steps": steps}
+    ok, msg = _hermes_kanban_run("archive", task_id)
+    if ok and _kanban_task_status(task_id) in (None, "archived"):
+        steps.append("archived")
+        _kanban_refresh_after_change(task_id)
+        return {"ok": True, "cancelled": task_id, "steps": steps}
 
-    if cp.returncode != 0:
-        return {"ok": False, "error": (cp.stderr or cp.stdout).strip()[:200], "steps": steps}
+    direct = _kanban_archive_direct(task_id, prev_status=status)
+    if direct.get("ok"):
+        steps.append("archived_direct")
+        _kanban_refresh_after_change(task_id)
+        return {"ok": True, "cancelled": task_id, "steps": steps}
 
-    steps.append("archived")
-
-    # Refresh board
-    try:
-        with kanban_snapshot_lock:
-            kanban_snapshot.pop(task_id, None)
-        _resolve_prefix(f"task_blocked:{task_id}")
-        _resolve_prefix(f"stalled_task:{task_id}")
-        board = kanban_board_summary()
-        broadcast({"type": "kanban_board", **board})
-    except Exception:
-        pass
-
-    return {"ok": True, "cancelled": task_id, "steps": steps}
+    return {
+        "ok": False,
+        "error": direct.get("error") or msg or "archive failed",
+        "steps": steps,
+    }
 
 
 def kanban_archive_one(task_id: str) -> dict:
-    """Archive a single kanban task via the hermes CLI (so any extra
-    bookkeeping the CLI does — log cleanup, event recording — happens too).
-    """
+    """Archive a single kanban task. Tries hermes CLI first, then direct DB write."""
     if not task_id or not task_id.startswith("t_"):
         return {"ok": False, "error": "invalid task id"}
-    try:
-        cp = subprocess.run(
-            ["hermes", "kanban", "archive", task_id],
-            capture_output=True, text=True, timeout=10,
-        )
-    except Exception as exc:
-        return {"ok": False, "error": str(exc)}
-    if cp.returncode != 0:
-        return {"ok": False, "error": (cp.stderr or cp.stdout).strip()[:200]}
-    # Force a board refresh so SSE clients see the card disappear.
-    try:
-        with kanban_snapshot_lock:
-            kanban_snapshot.pop(task_id, None)
-        board = kanban_board_summary()
-        broadcast({"type": "kanban_board", **board})
-    except Exception:
-        pass
-    return {"ok": True, "archived": [task_id]}
+
+    ok, msg = _hermes_kanban_run("archive", task_id)
+    if ok and _kanban_task_status(task_id) in (None, "archived"):
+        _kanban_refresh_after_change(task_id)
+        return {"ok": True, "archived": [task_id], "method": "hermes"}
+
+    direct = _kanban_archive_direct(task_id)
+    if direct.get("ok"):
+        _kanban_refresh_after_change(task_id)
+        return {"ok": True, "archived": [task_id], "method": direct.get("method", "direct")}
+
+    err = direct.get("error") or msg or "archive failed"
+    return {"ok": False, "error": err}
 
 
 def kanban_archive_done() -> dict:
@@ -1884,17 +2186,11 @@ def kanban_archive_done() -> dict:
     archived: list[str] = []
     failed: list[dict] = []
     for tid in ids:
-        try:
-            cp = subprocess.run(
-                ["hermes", "kanban", "archive", tid],
-                capture_output=True, text=True, timeout=10,
-            )
-            if cp.returncode == 0:
-                archived.append(tid)
-            else:
-                failed.append({"id": tid, "error": (cp.stderr or cp.stdout).strip()[:120]})
-        except Exception as exc:
-            failed.append({"id": tid, "error": str(exc)})
+        result = kanban_archive_one(tid)
+        if result.get("ok"):
+            archived.append(tid)
+        else:
+            failed.append({"id": tid, "error": (result.get("error") or "unknown")[:120]})
 
     # Refresh the board snapshot + broadcast so the UI updates immediately.
     try:
@@ -2026,8 +2322,8 @@ def backup_status() -> dict:
             **base,
             "ok": False,
             "error": (
-                "Backup not configured. Clone sf_agents to ~/Documents/sf_agents "
-                "or set HERMES_BACKUP_REPO and HERMES_BACKUP_SCRIPT."
+                "Backup not configured. "
+                "Set HERMES_BACKUP_REPO and HERMES_BACKUP_SCRIPT environment variables."
             ),
         }
     if not os.path.isdir(BACKUP_REPO):
@@ -2062,8 +2358,8 @@ def run_backup() -> dict:
             "ok": False,
             "configured": False,
             "error": (
-                "Backup not configured. Clone sf_agents to ~/Documents/sf_agents "
-                "or set HERMES_BACKUP_REPO and HERMES_BACKUP_SCRIPT."
+                "Backup not configured. "
+                "Set HERMES_BACKUP_REPO and HERMES_BACKUP_SCRIPT environment variables."
             ),
         }
     try:
@@ -2471,7 +2767,7 @@ def _missing_key_builder(m, aid):
     key_name = m.group("key") if "key" in m.groupdict() else "API key"
     _raise_issue(f"missing_key:{key_name}", "critical", aid,
                  f"Missing API key: {key_name}",
-                 f"Set {key_name} in ~/.hermes/.env and restart")
+                 f"Set {key_name} in {HERMES_DIR}/.env and restart")
     return None  # don't spam feed
 
 _register_pattern(
@@ -2911,11 +3207,13 @@ class Watcher(threading.Thread):
                 except json.JSONDecodeError:
                     continue
                 self._process_session_event(aid, ev)
-        for source, path in [("gateway", GATEWAY_LOG), ("imagine", IMAGINE_GATEWAY_LOG)]:
-            try:
-                self.log_offsets[source] = os.path.getsize(path) if os.path.exists(path) else 0
-            except OSError:
-                self.log_offsets[source] = 0
+        for aid, paths in AGENT_LIVE_LOGS.items():
+            for log_type, path in paths.items():
+                source = f"{log_type}:{aid}"
+                try:
+                    self.log_offsets[source] = os.path.getsize(path) if os.path.exists(path) else 0
+                except OSError:
+                    self.log_offsets[source] = 0
 
         # state.db warmup: prime cursor, replay last WARMUP_TAIL rows from
         # non-jsonl sessions (worker / cli / cron). Sage's slack sessions are
@@ -3207,7 +3505,7 @@ class Watcher(threading.Thread):
                     session_id=session_short,
                 )
             elif kind == "delegation" and _trace_verbose():
-                em = _AGENT_EMOJI.get(agent_id, "•")
+                em = _agent_emoji(agent_id)
                 trace(
                     f"{em} `{agent_id}` · delegated → `{parsed.get('title','?')}` · "
                     f"{parsed.get('detail','')[:120]}"
@@ -3324,19 +3622,19 @@ class Watcher(threading.Thread):
         assignee = card.get("assignee") or "?"
         status = card.get("status", "?")
         elapsed = card.get("elapsed_s")
-        em = _AGENT_EMOJI.get(assignee, "•")
+        em = _agent_emoji(assignee)
 
         if not _trace_verbose():
             if prev_status is None:
                 if _trace_dedupe_milestone((tid, "created")):
                     return
                 trace(f"📋 kanban · `{tid}` created → {em} `{assignee}` · _{title}_")
-                _trace_add("sage", "kanban.created", f"{tid} → {assignee} · {title}")
+                _trace_add(HERMES_ORCHESTRATOR, "kanban.created", f"{tid} → {assignee} · {title}")
             elif prev_status in ("ready", "todo", "triage") and status == "running":
                 if _trace_dedupe_milestone((tid, "running")):
                     return
                 trace(f"⚡ kanban · `{tid}` claimed · {em} `{assignee}`")
-                _trace_add("sage", "kanban.running", f"{tid} claimed by {assignee}")
+                _trace_add(HERMES_ORCHESTRATOR, "kanban.running", f"{tid} claimed by {assignee}")
             elif status == "done":
                 if _trace_dedupe_milestone((tid, "done")):
                     return
@@ -3345,21 +3643,21 @@ class Watcher(threading.Thread):
                 trace(done_text)
                 _trace_done_incidents(card, detail)
                 dur = f"{elapsed}s" if elapsed is not None else "?"
-                _trace_add("sage", "kanban.done", f"{tid} done in {dur} · {assignee}")
+                _trace_add(HERMES_ORCHESTRATOR, "kanban.done", f"{tid} done in {dur} · {assignee}")
             elif status == "blocked":
                 if _trace_dedupe_milestone((tid, "blocked")):
                     return
                 trace_incident(assignee, "BLOCKED", f"{title} · `{tid}`", severity="blocked")
-                _trace_add("sage", "kanban.blocked", f"{tid} blocked · {assignee} · {title}")
+                _trace_add(HERMES_ORCHESTRATOR, "kanban.blocked", f"{tid} blocked · {assignee} · {title}")
             return
 
         if prev_status is None:
             trace(f"📋 kanban · `{tid}` created → {em} `{assignee}` · _{title}_")
-            _trace_add("sage", "kanban.created", f"{tid} → {assignee} · {title}")
+            _trace_add(HERMES_ORCHESTRATOR, "kanban.created", f"{tid} → {assignee} · {title}")
         elif prev_status in ("ready", "todo", "triage") and status == "running":
             wait = card.get("started_at", 0) - card.get("created_at", 0)
             trace(f"⚡ kanban · `{tid}` claimed by {em} `{assignee}` after `{wait}s` wait")
-            _trace_add("sage", "kanban.running", f"{tid} claimed by {assignee}")
+            _trace_add(HERMES_ORCHESTRATOR, "kanban.running", f"{tid} claimed by {assignee}")
         elif status == "done":
             dur = f"{elapsed}s" if elapsed is not None else "?"
             detail = _kanban_completion_detail(tid)
@@ -3368,11 +3666,11 @@ class Watcher(threading.Thread):
                 _trace_done_incidents(card, detail)
             else:
                 trace(f"✅ kanban · `{tid}` done in `{dur}` · {em} `{assignee}`")
-            _trace_add("sage", "kanban.done", f"{tid} done in {dur} · {assignee}")
+            _trace_add(HERMES_ORCHESTRATOR, "kanban.done", f"{tid} done in {dur} · {assignee}")
         elif status == "blocked":
             trace_incident(assignee, "BLOCKED", f"{title} · `{tid}`", severity="blocked")
             trace(f"⛔ kanban · `{tid}` BLOCKED · {em} `{assignee}` · _{title}_")
-            _trace_add("sage", "kanban.blocked", f"{tid} blocked · {assignee} · {title}")
+            _trace_add(HERMES_ORCHESTRATOR, "kanban.blocked", f"{tid} blocked · {assignee} · {title}")
         else:
             trace(f"📋 kanban · `{tid}` {prev_status} → {status} · {em} `{assignee}`")
 
@@ -3385,7 +3683,7 @@ class Watcher(threading.Thread):
             if err_code == "no_key":
                 _raise_issue("openrouter_no_key", "critical", None,
                              "OpenRouter API key missing",
-                             "OPENROUTER_API_KEY not set in ~/.hermes/.env")
+                             f"OPENROUTER_API_KEY not set in {HERMES_DIR}/.env")
             else:
                 _raise_issue("openrouter_api_error", "warning", None,
                              f"OpenRouter key check failed: {data.get('error', '')}",
@@ -3548,8 +3846,6 @@ class Watcher(threading.Thread):
                 })
 
 
-# ── HTTP Handler ───────────────────────────────────────────────────────────────
-
 MIME = {
     ".html": "text/html; charset=utf-8",
     ".css":  "text/css; charset=utf-8",
@@ -3593,6 +3889,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._serve_file(os.path.join(STATIC_DIR, rel))
         elif path == "/api/events":
             self._sse()
+        elif path == "/api/agents":
+            self._send_json({
+                "orchestrator": HERMES_ORCHESTRATOR,
+                "agents": _agent_metadata_list(),
+            })
         elif path == "/api/status":
             self._status()
         elif path == "/api/logs":
@@ -3616,6 +3917,95 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._send_json(prompt_trace_snapshot())
         elif path == "/api/health":
             self._send_json({"issues": _get_issues()})
+        elif path == "/api/info":
+            def _get_hermes_version() -> str:
+                try:
+                    cp = subprocess.run(["hermes", "version"], capture_output=True, text=True, timeout=5)
+                    return cp.stdout.strip().split("\n")[0] if cp.returncode == 0 else "unknown"
+                except Exception:
+                    return "unknown"
+
+            def _get_gateway_pid() -> "int | None":
+                state_file = os.path.join(HERMES_DIR, "gateway_state.json")
+                try:
+                    with open(state_file) as f:
+                        data = json.load(f)
+                        return data.get("pid")
+                except Exception:
+                    return None
+
+            worker_pids = {aid: _get_worker_pids(aid) for aid in AGENT_IDS if aid != HERMES_ORCHESTRATOR}
+            self._send_json({
+                "app": "Hermes Console",
+                "hermes_dir": HERMES_DIR,
+                "orchestrator": HERMES_ORCHESTRATOR,
+                "docker_container": DOCKER_CONTAINER or None,
+                "hermes_version": _get_hermes_version(),
+                "gateway_pid": _get_gateway_pid(),
+                "active_worker_pids": worker_pids,
+                "monitor_db": MONITOR_DB,
+                "webui_port": int(os.environ.get("HERMES_WEBUI_PORT", 7979)),
+            })
+        elif path == "/api/cron":
+            def _read_cron_db() -> list:
+                db_path = os.path.join(HERMES_DIR, "cron.db")
+                if not os.path.exists(db_path):
+                    return []
+                try:
+                    conn = sqlite3.connect(db_path, timeout=2)
+                    conn.row_factory = sqlite3.Row
+                    tables = [r[0] for r in conn.execute(
+                        "SELECT name FROM sqlite_master WHERE type='table'"
+                    ).fetchall()]
+                    tbl = next((t for t in tables if 'cron' in t.lower() or 'job' in t.lower()), None)
+                    if not tbl:
+                        conn.close()
+                        return []
+                    rows = conn.execute(f"SELECT * FROM {tbl} ORDER BY rowid DESC").fetchall()
+                    result = [dict(r) for r in rows]
+                    conn.close()
+                    return result
+                except Exception:
+                    return []
+
+            try:
+                cp = subprocess.run(
+                    ["hermes", "cron", "list", "--json"],
+                    capture_output=True, text=True, timeout=10,
+                    env={**os.environ, "HERMES_HOME": HERMES_DIR},
+                )
+                if cp.returncode == 0 and cp.stdout.strip().startswith('['):
+                    self._send_json({"jobs": json.loads(cp.stdout)})
+                elif cp.returncode == 0 and cp.stdout.strip().startswith('{'):
+                    parsed = json.loads(cp.stdout)
+                    self._send_json({"jobs": parsed.get("jobs", parsed.get("data", []))})
+                else:
+                    raise RuntimeError("cli output not json")
+            except Exception:
+                self._send_json({"jobs": _read_cron_db()})
+        elif path == "/api/settings":
+            self._send_json({
+                # Connection
+                "hermes_dir":         HERMES_DIR,
+                "orchestrator":       HERMES_ORCHESTRATOR,
+                "docker_container":   DOCKER_CONTAINER,
+                "webui_port":         PORT,
+                "extra_home":         HERMES_EXTRA_HOME,
+                # Monitoring
+                "trace_mode":         TRACE_MODE,
+                "slack_trace_channel": SLACK_TRACE_CHANNEL,
+                "warmup_freshness":   int(os.environ.get("HERMES_WEBUI_WARMUP_FRESHNESS", 21600)),
+                # Backup
+                "backup_repo":        BACKUP_REPO or "",
+                "backup_script":      BACKUP_SCRIPT or "",
+                # Data
+                "vector_db_url":      os.environ.get("HERMES_LOG_DB_URL", ""),
+                "files_max_age_days": int(os.environ.get("HERMES_FILES_MAX_AGE_DAYS", 14)),
+                "files_max_entries":  int(os.environ.get("HERMES_FILES_MAX_ENTRIES", 80)),
+                # Read-only status indicators
+                "trace_enabled":      TRACE_ENABLED,
+                "backup_configured":  bool(BACKUP_REPO and BACKUP_SCRIPT and os.path.isfile(BACKUP_SCRIPT)),
+            })
         else:
             self._send_json({"error": "not found"}, 404)
 
@@ -3639,6 +4029,70 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self._send_json(agent_lifecycle(agent_id, action))
             else:
                 self._send_json({"error": "expected /api/agent/<id>/<action>"}, 400)
+        elif path.startswith("/api/cron/"):
+            parts = path.strip("/").split("/")
+            # parts = ["api", "cron", "<id>", "<action>"]
+            if len(parts) == 4:
+                cron_id, cron_action = parts[2], parts[3]
+                if cron_action not in ("pause", "resume", "run"):
+                    self._send_json({"error": f"unknown cron action: {cron_action}"}, 400)
+                else:
+                    try:
+                        cp = subprocess.run(
+                            ["hermes", "cron", cron_action, cron_id],
+                            capture_output=True, text=True, timeout=15,
+                            env={**os.environ, "HERMES_HOME": HERMES_DIR},
+                        )
+                        self._send_json({"ok": cp.returncode == 0, "action": cron_action,
+                                         "id": cron_id, "msg": (cp.stderr or cp.stdout).strip()})
+                    except Exception as exc:
+                        self._send_json({"ok": False, "error": str(exc)}, 500)
+            else:
+                self._send_json({"error": "expected /api/cron/<id>/<action>"}, 400)
+        elif path == "/api/settings":
+            body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            data = json.loads(body)
+            env_local = os.path.join(SCRIPT_DIR, ".env.local")
+            KEY_MAP = {
+                "hermes_dir":          "HERMES_DIR",
+                "orchestrator":        "HERMES_ORCHESTRATOR",
+                "docker_container":    "HERMES_DOCKER_CONTAINER",
+                "webui_port":          "HERMES_WEBUI_PORT",
+                "extra_home":          "HERMES_EXTRA_HOME",
+                "trace_mode":          "HERMES_TRACE_MODE",
+                "slack_trace_channel": "SLACK_TRACE_CHANNEL",
+                "warmup_freshness":    "HERMES_WEBUI_WARMUP_FRESHNESS",
+                "backup_repo":         "HERMES_BACKUP_REPO",
+                "backup_script":       "HERMES_BACKUP_SCRIPT",
+                "vector_db_url":       "HERMES_LOG_DB_URL",
+                "files_max_age_days":  "HERMES_FILES_MAX_AGE_DAYS",
+                "files_max_entries":   "HERMES_FILES_MAX_ENTRIES",
+            }
+            # Read existing .env.local so saving one tab doesn't wipe other tabs' keys
+            existing: dict[str, str] = {}
+            if os.path.isfile(env_local):
+                with open(env_local) as _f:
+                    for _line in _f:
+                        _line = _line.strip()
+                        if _line and not _line.startswith("#") and "=" in _line:
+                            _k, _, _v = _line.partition("=")
+                            existing[_k.strip()] = _v.strip()
+            updated = 0
+            for k, v in data.items():
+                env_key = KEY_MAP.get(k)
+                if env_key is None:
+                    continue
+                val = str(v).strip()
+                if val:
+                    existing[env_key] = val
+                else:
+                    existing.pop(env_key, None)
+                updated += 1
+            with open(env_local, "w") as _f:
+                _f.write("# Written by Hermes Console — settings panel\n")
+                for _k, _v in existing.items():
+                    _f.write(f"{_k}={_v}\n")
+            self._send_json({"ok": True, "restart_required": True, "written": updated})
         else:
             self._send_json({"error": "not found"}, 404)
 
@@ -3678,7 +4132,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 "last_seen": s.get("last_seen"),
                 "session": s.get("session"),
                 "gateway_running": _agent_running(aid),
-                "has_gateway": aid in AGENT_PLISTS,
+                "has_gateway": (aid == HERMES_ORCHESTRATOR) if DOCKER_CONTAINER else (aid in AGENT_PLISTS),
+                "pids": (_get_worker_pids(aid) if aid != HERMES_ORCHESTRATOR else []),
+                "worker_count": (len(_get_worker_pids(aid)) if aid != HERMES_ORCHESTRATOR else 0),
             }
         board = kanban_board_summary()
         self._send_json({
@@ -3751,8 +4207,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             n = int(params.get("lines", 200))
         except ValueError:
             n = 200
-        path_map = {"gateway": GATEWAY_LOG, "imagine": IMAGINE_GATEWAY_LOG}
-        path = path_map.get(source, GATEWAY_LOG)
+        path_map = {aid: AGENT_LIVE_LOGS[aid].get("gateway", AGENT_LIVE_LOGS[aid]["agent"])
+                    for aid in AGENT_LIVE_LOGS}
+        path_map.setdefault("gateway", GATEWAY_LOG)   # keep legacy "gateway" key
+        path = path_map.get(source, GATEWAY_LOG)      # fallback to orchestrator log
         lines = read_last_lines(path, n)
         self._send_json({"lines": lines, "source": source})
 
@@ -3841,14 +4299,19 @@ def main():
     watcher.start()
 
     server = ThreadedHTTPServer(("0.0.0.0", PORT), Handler)
-    print(f"Hermes Monitor running at http://localhost:{PORT}")
+    print(f"Hermes Console running at http://localhost:{PORT}")
     print(f"  Hermes home : {HERMES_DIR}")
+    if HERMES_EXTRA_HOME:
+        print(f"  Extra home  : {HERMES_EXTRA_HOME}  (Docker lab)")
     print(f"  Profiles    : {PROFILES_DIR}")
     print(f"  Workspaces  : {WORKSPACE_DIR}")
     print(f"  Logs dir    : {LOGS_DIR}")
     print(f"  Static dir  : {STATIC_DIR}")
     print(f"  Agents      : {', '.join(AGENT_IDS)}")
-    print(f"  Trace mirror: {'ENABLED → ' + SLACK_TRACE_CHANNEL if TRACE_ENABLED else 'disabled (set SLACK_TRACE_CHANNEL + SLACK_BOT_TOKEN in ~/.hermes/.env)'}")
+    extra = [a for a in AGENT_IDS if a in _AGENT_HOME_MAP]
+    if extra:
+        print(f"  Lab agents  : {', '.join(extra)}")
+    print(f"  Trace mirror: {'ENABLED → ' + SLACK_TRACE_CHANNEL if TRACE_ENABLED else f'disabled (set SLACK_TRACE_CHANNEL + SLACK_BOT_TOKEN in {HERMES_DIR}/.env)'}")
     print("Press Ctrl+C to stop.")
     try:
         server.serve_forever()
