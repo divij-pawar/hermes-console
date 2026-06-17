@@ -3,14 +3,13 @@
 Live trajectory watcher for Hermes agents.
 
 Usage:
-    python3 watch_agents.py              # watch all configured agents
-    python3 watch_agents.py sage         # watch sage only
-    python3 watch_agents.py imagine      # watch imagine only
+    python3 watch_agents.py              # watch all discovered agents
+    python3 watch_agents.py sage         # watch one agent/profile
 
 Tails each agent's latest session jsonl and prints assistant turns, tool
-calls, and tool results to the terminal in colour. Sage runs in the default
-profile (~/.hermes/sessions); named profiles namespace under
-~/.hermes/profiles/<name>/sessions.
+calls, and tool results to the terminal in colour. The root/orchestrator
+profile is read from HERMES_ORCHESTRATOR; named profiles live under
+HERMES_DIR/profiles/<name>/sessions.
 """
 
 import glob
@@ -20,19 +19,30 @@ import sys
 import time
 from datetime import datetime, timezone
 
-HERMES_DIR = os.path.expanduser("~/.hermes")
-PROFILES_DIR = os.path.join(HERMES_DIR, "profiles")
+def _bootstrap_env() -> None:
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    for name in (".env", ".env.local"):
+        path = os.path.join(script_dir, name)
+        try:
+            with open(path, encoding="utf-8") as f:
+                for raw in f:
+                    line = raw.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    key, val = line.split("=", 1)
+                    key = key.strip()
+                    val = os.path.expanduser(val.strip().strip("'\""))
+                    if key and key not in os.environ:
+                        os.environ[key] = val
+        except OSError:
+            pass
 
-AGENTS = {
-    "sage": {
-        "label": "SAGE 🧭",
-        "color": "\033[94m",   # blue
-    },
-    "imagine": {
-        "label": "IMAGINE 🎨",
-        "color": "\033[95m",   # magenta
-    },
-}
+
+_bootstrap_env()
+
+HERMES_DIR = os.path.expanduser(os.environ.get("HERMES_DIR", "~/.hermes"))
+HERMES_ORCHESTRATOR = os.environ.get("HERMES_ORCHESTRATOR", "sage")
+PROFILES_DIR = os.path.join(HERMES_DIR, "profiles")
 
 RESET = "\033[0m"
 DIM = "\033[2m"
@@ -44,8 +54,41 @@ CYAN = "\033[96m"
 SEEN_EVENTS = set()
 
 
+_KNOWN = {
+    "sage": ("SAGE 🧭", "\033[94m"),
+    "imagine": ("IMAGINE 🎨", "\033[95m"),
+    "ink": ("INK 🖊️", "\033[92m"),
+    "recon": ("RECON 🔎", "\033[93m"),
+    "signal": ("SIGNAL 📡", "\033[96m"),
+    "anton": ("ANTON 🔨", "\033[33m"),
+}
+_COLORS = ["\033[94m", "\033[95m", "\033[92m", "\033[93m", "\033[96m", "\033[91m"]
+
+
+def discover_agents() -> dict[str, dict]:
+    ids = [HERMES_ORCHESTRATOR]
+    if os.path.isdir(PROFILES_DIR):
+        for name in sorted(os.listdir(PROFILES_DIR)):
+            if os.path.isdir(os.path.join(PROFILES_DIR, name)) and name not in ids:
+                ids.append(name)
+    agents: dict[str, dict] = {}
+    palette_idx = 0
+    for aid in ids:
+        if aid in _KNOWN:
+            label, color = _KNOWN[aid]
+        else:
+            label = aid.upper()
+            color = _COLORS[palette_idx % len(_COLORS)]
+            palette_idx += 1
+        agents[aid] = {"label": label, "color": color}
+    return agents
+
+
+AGENTS = discover_agents()
+
+
 def _agent_root(agent_id: str) -> str:
-    if agent_id == "sage":
+    if agent_id == HERMES_ORCHESTRATOR:
         return HERMES_DIR
     return os.path.join(PROFILES_DIR, agent_id)
 

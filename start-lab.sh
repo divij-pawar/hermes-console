@@ -33,6 +33,7 @@ fi
 
 LAB_HOME="${HERMES_DIR:-/tmp/hermes-anton-lab/home}"
 PORT="${HERMES_WEBUI_PORT:-7980}"
+HOST="${HERMES_WEBUI_HOST:-127.0.0.1}"
 CONTAINER="${HERMES_DOCKER_CONTAINER:-hermes-anton-lab}"
 
 GREEN=$'\033[32m'
@@ -45,6 +46,7 @@ RESET=$'\033[0m'
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --port) PORT="$2"; shift 2 ;;
+    --host) HOST="$2"; shift 2 ;;
     --lab-home) LAB_HOME="$2"; shift 2 ;;
     *) echo "Unknown option: $1"; exit 1 ;;
   esac
@@ -71,12 +73,14 @@ fi
 echo "${GREEN}Hermes Lab Monitor${RESET}"
 echo "${DIM}  Lab home  : $LAB_HOME${RESET}"
 echo "${DIM}  Container : $CONTAINER${RESET}"
+echo "${DIM}  Host      : $HOST${RESET}"
 echo "${DIM}  Port      : $PORT${RESET}"
 echo "${DIM}  Press Ctrl+C to stop${RESET}"
 echo
 
 exec env \
   HERMES_DIR="$LAB_HOME" \
+  HERMES_WEBUI_HOST="$HOST" \
   HERMES_WEBUI_PORT="$PORT" \
   HERMES_MONITOR_DB="$LAB_HOME/monitor.db" \
   HERMES_DOCKER_CONTAINER="$CONTAINER" \

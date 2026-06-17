@@ -2059,12 +2059,17 @@ async function loadSettingsValues() {
     _setVal('cfg-orchestrator', s.orchestrator   || '');
     _setVal('cfg-docker',       s.docker_container || '');
     _setVal('cfg-port',         s.webui_port     || 7979);
+    _setVal('cfg-host',         s.webui_host     || '127.0.0.1');
     _setVal('cfg-extra-home',   s.extra_home     || '');
+    _setVal('cfg-agent-plists', s.agent_plists   || '');
+    _setVal('cfg-agent-labels', s.agent_labels   || '');
 
     // Monitoring
     _setVal('cfg-trace-mode',    s.trace_mode    || 'milestones');
     _setVal('cfg-slack-channel', s.slack_trace_channel || '');
     _setVal('cfg-warmup',        s.warmup_freshness || 21600);
+    _setVal('cfg-media-dir',     s.media_dir     || '');
+    _setVal('cfg-media-agent',   s.media_agent   || '');
 
     // Status chip for monitoring tab
     const traceChip = document.getElementById('sfield-trace-chip');
@@ -2105,7 +2110,7 @@ async function loadSettingsValues() {
 
   // Panels tab — read from localStorage
   const prefs = _getPrefs();
-  _setChecked('toggle-dark',    prefs.dark    || false);
+  _setChecked('toggle-dark',    _darkModeEnabled(prefs));
   _setChecked('toggle-compact', prefs.compact || false);
   ['usage','backup','traces','activity','files','cron'].forEach(p => {
     _setChecked('panel-' + p, prefs['panel_' + p] !== false);
@@ -2135,12 +2140,17 @@ async function saveSettings(tab) {
       orchestrator:     document.getElementById('cfg-orchestrator')?.value  || '',
       docker_container: document.getElementById('cfg-docker')?.value        || '',
       webui_port:       parseInt(document.getElementById('cfg-port')?.value || 7979),
+      webui_host:       document.getElementById('cfg-host')?.value          || '',
       extra_home:       document.getElementById('cfg-extra-home')?.value    || '',
+      agent_plists:     document.getElementById('cfg-agent-plists')?.value  || '',
+      agent_labels:     document.getElementById('cfg-agent-labels')?.value  || '',
     }),
     monitoring: () => ({
       trace_mode:         document.getElementById('cfg-trace-mode')?.value    || 'milestones',
       slack_trace_channel:document.getElementById('cfg-slack-channel')?.value || '',
       warmup_freshness:   parseInt(document.getElementById('cfg-warmup')?.value || 21600),
+      media_dir:          document.getElementById('cfg-media-dir')?.value      || '',
+      media_agent:        document.getElementById('cfg-media-agent')?.value    || '',
     }),
     backup: () => ({
       backup_repo:   document.getElementById('cfg-backup-repo')?.value   || '',
@@ -2181,12 +2191,19 @@ function _savePrefs(prefs) {
   localStorage.setItem('hermes-prefs', JSON.stringify(prefs));
 }
 
+function _darkModeEnabled(prefs) {
+  return prefs.dark !== false;
+}
+
 function applyAppearance() {
   const prefs = _getPrefs();
-  prefs.dark    = document.getElementById('toggle-dark')?.checked    || false;
-  prefs.compact = document.getElementById('toggle-compact')?.checked || false;
+  const darkEl = document.getElementById('toggle-dark');
+  const compactEl = document.getElementById('toggle-compact');
+  prefs.dark    = darkEl?.checked    ?? true;
+  prefs.compact = compactEl?.checked || false;
   _savePrefs(prefs);
-  document.body.classList.toggle('dark-mode',    prefs.dark);
+  document.body.classList.toggle('dark-mode',    _darkModeEnabled(prefs));
+  document.body.classList.toggle('light-mode',   !_darkModeEnabled(prefs));
   document.body.classList.toggle('compact-mode', prefs.compact);
 }
 
@@ -2217,7 +2234,8 @@ function applyPanelVisibility() {
 // Restore appearance + panel visibility on every page load
 (function restorePrefsOnLoad() {
   const prefs = _getPrefs();
-  if (prefs.dark)    document.body.classList.add('dark-mode');
+  document.body.classList.toggle('dark-mode', _darkModeEnabled(prefs));
+  document.body.classList.toggle('light-mode', !_darkModeEnabled(prefs));
   if (prefs.compact) document.body.classList.add('compact-mode');
   const PANEL_MAP = {
     usage:    '#usage-panel',

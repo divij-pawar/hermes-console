@@ -59,14 +59,19 @@ cp .env.example .env
 | `HERMES_DIR` | `~/.hermes` | Hermes home directory. All profiles, kanban DB, and logs are read from here. |
 | `HERMES_ORCHESTRATOR` | `sage` | Root agent name — the one whose sessions live directly in `HERMES_DIR` rather than under `profiles/<name>`. Change this if your workflow uses a different name for the default agent. |
 | `HERMES_WEBUI_PORT` | `7979` | HTTP port the dashboard listens on. |
+| `HERMES_WEBUI_HOST` | `127.0.0.1` | Bind address. Use `0.0.0.0` only when intentionally exposing the console on a network. |
 | `HERMES_MONITOR_DB` | `<web-ui>/monitor.db` | SQLite file for API usage events and prompt traces. Set a different path when running two instances so they don't share data. |
 | `HERMES_DOCKER_CONTAINER` | _(unset)_ | Docker container name. When set, start/stop/restart buttons use `docker` commands instead of `launchctl`. Leave blank for a native macOS launchd-managed gateway. |
+| `HERMES_AGENT_PLISTS` | sage/imagine defaults | Optional comma map for native launchd gateways, e.g. `sage=~/Library/LaunchAgents/ai.hermes.gateway.plist`. |
+| `HERMES_AGENT_LABELS` | sage/imagine defaults | Optional comma map for launchd labels, e.g. `sage=ai.hermes.gateway`. |
 | `HERMES_EXTRA_HOME` | _(unset)_ | Second Hermes home to monitor alongside the primary one. Use this to show both production and lab agents in a single dashboard. |
 | `HERMES_BACKUP_REPO` | _(unset)_ | Git repo path containing `backup.sh`. Enables the backup panel. Leave blank to hide it. |
 | `HERMES_BACKUP_SCRIPT` | _(auto)_ | Path to `backup.sh`. Auto-detected as `HERMES_BACKUP_REPO/backup.sh` if not set. |
 | `SLACK_BOT_TOKEN` | _(unset)_ | Slack bot token (`xoxb-…`) for the trace mirror. Falls back to reading `HERMES_DIR/.env`. |
 | `SLACK_TRACE_CHANNEL` | _(unset)_ | Channel ID for the Slack trace mirror. Both this and `SLACK_BOT_TOKEN` must be set to enable. |
 | `HERMES_TRACE_MODE` | `milestones` | Slack mirror verbosity: `milestones` (quiet) or `verbose` (all tool calls). |
+| `HERMES_MEDIA_DIR` | `HERMES_DIR/cache/images` | Optional generated-media directory outside agent workspaces to scan. |
+| `HERMES_MEDIA_AGENT` | `imagine` | Agent ID used to attribute files from `HERMES_MEDIA_DIR`; falls back to the orchestrator if absent. |
 | `HERMES_WEBUI_WARMUP_FRESHNESS` | `21600` | Seconds of past session events to replay into the activity feed on startup. Set to `0` for a clean feed. |
 
 **Priority order (highest to lowest):** shell environment → `.env.local` → `.env` → built-in defaults.
@@ -83,6 +88,8 @@ Agents are discovered automatically at startup from `HERMES_DIR/profiles/`.
 - The orchestrator (`HERMES_ORCHESTRATOR`) is always included as the root agent
 - Any `profiles/<name>/` subdirectory is picked up automatically
 - Well-known agents (sage, imagine, ink, recon, signal, anton) get fixed colors and emojis; new profiles get the next slot from a built-in palette
+- Native launchd gateway controls can be mapped per workflow with `HERMES_AGENT_PLISTS` and `HERMES_AGENT_LABELS`
+- Docker worker controls discover active worker PIDs from `kanban.db` instead of hardcoding agent locations
 
 The frontend bootstraps the agent list from `/api/agents` on page load.
 
@@ -192,17 +199,22 @@ Click the **⚙** gear button in the top-right corner of the header to open the 
 
 ### Connection tab
 
-Writes settings to `.env.local` (in the `web-ui/` directory) and reloads the server on save.
+Writes settings to `.env.local` (in the `web-ui/` directory). Restart the server
+after saving env-backed settings so the Python process reloads them.
 
 | Field | Env var | Description |
 |---|---|---|
 | HERMES_DIR | `HERMES_DIR` | Path to the Hermes home directory |
 | Orchestrator | `HERMES_ORCHESTRATOR` | Root agent name (default: `sage`) |
 | Docker Container | `HERMES_DOCKER_CONTAINER` | Container name, or blank for launchctl mode |
+| Web UI Host | `HERMES_WEBUI_HOST` | Bind address (`127.0.0.1` by default) |
 | Web UI Port | `HERMES_WEBUI_PORT` | HTTP port (requires restart to take effect) |
+| Agent Launchd Plists | `HERMES_AGENT_PLISTS` | Optional comma map of agent → plist path |
+| Agent Launchd Labels | `HERMES_AGENT_LABELS` | Optional comma map of agent → launchd label |
 | Backup Repo Path | `HERMES_BACKUP_REPO` | Git repo containing `backup.sh` |
 
-Click **Save & Restart** to write `.env.local` and reload the page after 1.5 s.
+Click **Save** to write `.env.local`; restart the monitor to apply server-side
+changes.
 
 ### Appearance tab
 
@@ -238,8 +250,8 @@ Stored in `localStorage` — no server round-trip needed.
 | GET | `/api/backup/status` | Git backup repo status |
 | POST | `/api/backup/run` | Run `backup.sh` |
 | POST | `/api/kanban/archive-done` | Archive all done cards |
-| POST | `/api/kanban/card/<id>/archive` | Archive one card |
-| POST | `/api/kanban/card/<id>/cancel` | Reclaim + archive a running card |
+| POST | `/api/kanban/card/<id>/archive` | Archive one card; falls back to direct kanban.db update if Hermes CLI cannot archive it |
+| POST | `/api/kanban/card/<id>/cancel` | Reclaim + archive a card; falls back to direct kanban.db update for dispatcher-owned/lab cards |
 | POST | `/api/agent/<id>/<start\|stop\|restart>` | Control a gateway (launchd or Docker) |
 
 ---

@@ -13,6 +13,8 @@ dist/
 build/
 *.log
 .env
+.env.local
+.env.lab
 *.bak
 *.tmp
 *.cache

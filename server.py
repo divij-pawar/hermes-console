@@ -53,6 +53,7 @@ _bootstrap_env()
 # ── Paths ──────────────────────────────────────────────────────────────────────
 HERMES_DIR         = os.environ.get("HERMES_DIR", os.path.expanduser("~/.hermes"))
 HERMES_ORCHESTRATOR = os.environ.get("HERMES_ORCHESTRATOR", "sage")
+HERMES_WEBUI_HOST = os.environ.get("HERMES_WEBUI_HOST", "127.0.0.1")
 PROFILES_DIR  = os.path.join(HERMES_DIR, "profiles")
 WORKSPACE_DIR = os.path.join(HERMES_DIR, "workspace")
 LOGS_DIR      = os.path.join(HERMES_DIR, "logs")
@@ -1577,6 +1578,17 @@ def _track_memory_preflight_from_event(
 
 # ── File registry ──────────────────────────────────────────────────────────────
 
+MEDIA_DIR = os.path.expanduser(os.environ.get(
+    "HERMES_MEDIA_DIR",
+    os.path.join(HERMES_DIR, "cache", "images"),
+))
+MEDIA_AGENT = os.environ.get("HERMES_MEDIA_AGENT", "imagine").strip()
+
+
+def _media_agent_id() -> str:
+    return MEDIA_AGENT if MEDIA_AGENT in AGENT_IDS else HERMES_ORCHESTRATOR
+
+
 def _agent_id_for_path(path: str) -> str | None:
     """Map an on-disk path to a monitor agent id when under workspace or cache."""
     try:
@@ -1590,8 +1602,8 @@ def _agent_id_for_path(path: str) -> str | None:
         ws = os.path.realpath(os.path.join(WORKSPACE_DIR, aid))
         if real.startswith(ws + os.sep):
             return aid
-    if real.startswith(os.path.realpath(MEDIA_DIR) + os.sep):
-        return "imagine"
+    if MEDIA_DIR and real.startswith(os.path.realpath(MEDIA_DIR) + os.sep):
+        return _media_agent_id()
     return None
 
 
@@ -1706,13 +1718,10 @@ def register_file(agent_id: str, path: str, broadcast_event: bool = True) -> boo
     return True
 
 
-MEDIA_DIR = os.path.join(HERMES_DIR, "cache", "images")
-
-
 def _is_allowed_file_path(path: str) -> bool:
     """Security check: only serve files within agent workspaces, output dirs, or media."""
     real = os.path.realpath(path)
-    if real.startswith(os.path.realpath(MEDIA_DIR) + os.sep):
+    if MEDIA_DIR and real.startswith(os.path.realpath(MEDIA_DIR) + os.sep):
         return True
     for aid in AGENT_IDS:
         ws = os.path.realpath(os.path.join(WORKSPACE_DIR, aid))
@@ -1954,15 +1963,38 @@ def _row_to_card(row) -> dict:
     }
 
 
-# Per-agent launchd control. Pure-worker profiles (ink, etc.) intentionally
-# have no plist — they're spawned on demand by Sage's dispatcher.
-AGENT_PLISTS = {
+# Per-agent launchd control. Configure workflow-specific gateways via:
+#   HERMES_AGENT_PLISTS=sage=~/Library/LaunchAgents/ai.hermes.gateway.plist,imagine=...
+#   HERMES_AGENT_LABELS=sage=ai.hermes.gateway,imagine=...
+# Defaults preserve the original sage/imagine setup without making it mandatory.
+def _parse_agent_map(raw: str) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for part in (raw or "").split(","):
+        if not part.strip() or "=" not in part:
+            continue
+        key, val = part.split("=", 1)
+        key = key.strip()
+        val = os.path.expanduser(val.strip())
+        if key and val:
+            out[key] = val
+    return out
+
+
+_DEFAULT_AGENT_PLISTS = {
     "sage": os.path.expanduser("~/Library/LaunchAgents/ai.hermes.gateway.plist"),
     "imagine": os.path.expanduser("~/Library/LaunchAgents/ai.hermes.gateway-imagine.plist"),
 }
-AGENT_LAUNCHD_LABELS = {
+_DEFAULT_AGENT_LABELS = {
     "sage": "ai.hermes.gateway",
     "imagine": "ai.hermes.gateway-imagine",
+}
+AGENT_PLISTS = {
+    **_DEFAULT_AGENT_PLISTS,
+    **_parse_agent_map(os.environ.get("HERMES_AGENT_PLISTS", "")),
+}
+AGENT_LAUNCHD_LABELS = {
+    **_DEFAULT_AGENT_LABELS,
+    **_parse_agent_map(os.environ.get("HERMES_AGENT_LABELS", "")),
 }
 
 # When HERMES_DOCKER_CONTAINER is set the monitor routes all agent lifecycle
@@ -1972,7 +2004,7 @@ DOCKER_CONTAINER = os.environ.get("HERMES_DOCKER_CONTAINER", "").strip()
 
 
 def _get_worker_pids(agent_id: str) -> list[int]:
-    """Return PIDs of in-progress kanban workers for agent_id (Docker mode only)."""
+    """Return PIDs of active kanban workers for agent_id (Docker mode only)."""
     db_path = os.path.join(HERMES_DIR, "kanban.db")
     if not os.path.exists(db_path):
         return []
@@ -1980,7 +2012,8 @@ def _get_worker_pids(agent_id: str) -> list[int]:
         conn = sqlite3.connect(db_path, timeout=2)
         rows = conn.execute(
             "SELECT worker_pid FROM tasks "
-            "WHERE status='in_progress' AND assignee=? AND worker_pid IS NOT NULL",
+            "WHERE status IN ('running', 'blocked') "
+            "AND assignee=? AND worker_pid IS NOT NULL",
             (agent_id,)
         ).fetchall()
         conn.close()
@@ -2690,7 +2723,7 @@ def _auth_error_builder(m, aid):
     }
 
 _register_pattern(
-    r"(?i)(HTTP 401|authentication.fail|api.key.invalid|invalid.api.key|Unauthorized)",
+    r"(?i)(HTTP\s*(?:401|403)\b|authentication.fail|api.key.invalid|invalid.api.key)",
     _auth_error_builder,
 )
 
@@ -2889,7 +2922,6 @@ _register_pattern(
     _slack_delivery_failed_builder,
 )
 
-
 def _now_hms() -> str:
     """Wall-clock HH:MM:SS for live-feed entries. The activity-feed renderer
     converts this to AM/PM."""
@@ -2908,6 +2940,12 @@ def _parse_live_log_line(source: str, line: str) -> dict | None:
         return None
     _, aid = source.split(":", 1)
     if aid not in AGENT_IDS:
+        return None
+    lower_line = line.lower()
+    if "gateway.run:" in lower_line and (
+        "no user allowlists configured" in lower_line
+        or "unauthorized users will be denied" in lower_line
+    ):
         return None
     for rx, builder in _LIVE_LOG_PATTERNS:
         m = rx.search(line)
@@ -3527,7 +3565,7 @@ class Watcher(threading.Thread):
                         aid, fpath, broadcast_event=broadcast_event
                     ):
                         registered += 1
-        if FILE_POLL_CACHE_IMAGES and os.path.isdir(MEDIA_DIR):
+        if FILE_POLL_CACHE_IMAGES and MEDIA_DIR and os.path.isdir(MEDIA_DIR):
             try:
                 names = os.listdir(MEDIA_DIR)
             except OSError:
@@ -3537,7 +3575,7 @@ class Watcher(threading.Thread):
                     continue
                 fpath = os.path.join(MEDIA_DIR, fname)
                 if os.path.isfile(fpath) and register_file(
-                    "imagine", fpath, broadcast_event=broadcast_event
+                    _media_agent_id(), fpath, broadcast_event=broadcast_event
                 ):
                     registered += 1
         return registered
@@ -3944,6 +3982,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 "gateway_pid": _get_gateway_pid(),
                 "active_worker_pids": worker_pids,
                 "monitor_db": MONITOR_DB,
+                "webui_host": HERMES_WEBUI_HOST,
                 "webui_port": int(os.environ.get("HERMES_WEBUI_PORT", 7979)),
             })
         elif path == "/api/cron":
@@ -3989,12 +4028,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 "hermes_dir":         HERMES_DIR,
                 "orchestrator":       HERMES_ORCHESTRATOR,
                 "docker_container":   DOCKER_CONTAINER,
+                "webui_host":         HERMES_WEBUI_HOST,
                 "webui_port":         PORT,
                 "extra_home":         HERMES_EXTRA_HOME,
+                "agent_plists":       os.environ.get("HERMES_AGENT_PLISTS", ""),
+                "agent_labels":       os.environ.get("HERMES_AGENT_LABELS", ""),
                 # Monitoring
                 "trace_mode":         TRACE_MODE,
                 "slack_trace_channel": SLACK_TRACE_CHANNEL,
                 "warmup_freshness":   int(os.environ.get("HERMES_WEBUI_WARMUP_FRESHNESS", 21600)),
+                "media_dir":          MEDIA_DIR,
+                "media_agent":        MEDIA_AGENT,
                 # Backup
                 "backup_repo":        BACKUP_REPO or "",
                 "backup_script":      BACKUP_SCRIPT or "",
@@ -4057,11 +4101,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 "hermes_dir":          "HERMES_DIR",
                 "orchestrator":        "HERMES_ORCHESTRATOR",
                 "docker_container":    "HERMES_DOCKER_CONTAINER",
+                "webui_host":          "HERMES_WEBUI_HOST",
                 "webui_port":          "HERMES_WEBUI_PORT",
                 "extra_home":          "HERMES_EXTRA_HOME",
+                "agent_plists":        "HERMES_AGENT_PLISTS",
+                "agent_labels":        "HERMES_AGENT_LABELS",
                 "trace_mode":          "HERMES_TRACE_MODE",
                 "slack_trace_channel": "SLACK_TRACE_CHANNEL",
                 "warmup_freshness":    "HERMES_WEBUI_WARMUP_FRESHNESS",
+                "media_dir":           "HERMES_MEDIA_DIR",
+                "media_agent":         "HERMES_MEDIA_AGENT",
                 "backup_repo":         "HERMES_BACKUP_REPO",
                 "backup_script":       "HERMES_BACKUP_SCRIPT",
                 "vector_db_url":       "HERMES_LOG_DB_URL",
@@ -4298,8 +4347,9 @@ def main():
     watcher = Watcher()
     watcher.start()
 
-    server = ThreadedHTTPServer(("0.0.0.0", PORT), Handler)
-    print(f"Hermes Console running at http://localhost:{PORT}")
+    server = ThreadedHTTPServer((HERMES_WEBUI_HOST, PORT), Handler)
+    display_host = "localhost" if HERMES_WEBUI_HOST in ("127.0.0.1", "0.0.0.0") else HERMES_WEBUI_HOST
+    print(f"Hermes Console running at http://{display_host}:{PORT}")
     print(f"  Hermes home : {HERMES_DIR}")
     if HERMES_EXTRA_HOME:
         print(f"  Extra home  : {HERMES_EXTRA_HOME}  (Docker lab)")
@@ -4307,6 +4357,7 @@ def main():
     print(f"  Workspaces  : {WORKSPACE_DIR}")
     print(f"  Logs dir    : {LOGS_DIR}")
     print(f"  Static dir  : {STATIC_DIR}")
+    print(f"  Bind host   : {HERMES_WEBUI_HOST}")
     print(f"  Agents      : {', '.join(AGENT_IDS)}")
     extra = [a for a in AGENT_IDS if a in _AGENT_HOME_MAP]
     if extra:

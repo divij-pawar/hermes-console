@@ -32,7 +32,12 @@
   background: var(--bg);
 }
 
-html, body { height: 100%; overflow: hidden; }
+html, body {
+  height: 100%;
+  overflow: hidden;
+  background: var(--bg);
+  color: var(--text);
+}
 
 /* ── Layout ──────────────────────────────────────────────────────────────── */
 
@@ -2008,11 +2013,104 @@ html, body { height: 100%; overflow: hidden; }
 /* Hide vestigial relay-controls if any remain in styling — safe no-op */
 .relay-controls, .relay-badge { display: none !important; }
 
-/* ── Dark / Compact mode overrides ─────────────────────────────────────────── */
-body.dark-mode { background: #0d1117; color: #c9d1d9; }
-body.dark-mode .sidebar-panel { background: #161b22; border-color: #30363d; }
-body.compact-mode .sidebar-panel { margin-bottom: 4px; }
-body.compact-mode .panel-title { padding: 5px 10px; }
+/* ── Appearance mode overrides ─────────────────────────────────────────────── */
+body.dark-mode {
+  --bg:        #0d1117;
+  --surface:   #161b22;
+  --surface2:  #1c2128;
+  --border:    #30363d;
+  --text:      #c9d1d9;
+  --dim:       #8b949e;
+}
+
+body.light-mode {
+  --bg:        #f6f8fa;
+  --surface:   #ffffff;
+  --surface2:  #f0f3f6;
+  --border:    #d0d7de;
+  --text:      #24292f;
+  --dim:       #57606a;
+  --accent-b:  #0969da;
+  --accent-g:  #1a7f37;
+  --accent-y:  #9a6700;
+  --accent-r:  #cf222e;
+  --accent-p:  #8250df;
+  --green:     #1a7f37;
+  --red:       #cf222e;
+  --yellow:    #9a6700;
+}
+
+body.compact-mode {
+  font-size: 12px;
+}
+
+body.compact-mode #app {
+  grid-template-rows: 44px 1fr;
+  grid-template-columns: 210px 1fr 230px;
+}
+
+body.compact-mode #header {
+  padding: 0 12px;
+}
+
+body.compact-mode .logo {
+  gap: 7px;
+  font-size: 13px;
+}
+
+body.compact-mode .logo-emoji {
+  font-size: 18px;
+}
+
+body.compact-mode .panel-title {
+  padding: 3px 2px 5px;
+  margin-bottom: 2px;
+  font-size: 10px;
+}
+
+body.compact-mode #agents-panel,
+body.compact-mode #files-panel,
+body.compact-mode #backup-panel,
+body.compact-mode #usage-panel,
+body.compact-mode #prompt-trace-panel,
+body.compact-mode #activity-panel {
+  padding: 7px 9px;
+}
+
+body.compact-mode .agent-card,
+body.compact-mode .kanban-card,
+body.compact-mode .event-row,
+body.compact-mode .usage-provider-card,
+body.compact-mode .prompt-trace-row,
+body.compact-mode .activity-row {
+  padding: 5px 7px;
+}
+
+body.compact-mode .feed-header {
+  padding: 7px 10px;
+}
+
+body.compact-mode #feed-list,
+body.compact-mode .kanban-cols {
+  gap: 4px;
+}
+
+body.compact-mode .kanban-col {
+  padding: 7px;
+}
+
+body.compact-mode .kanban-card-title,
+body.compact-mode .event-title {
+  font-size: 11px;
+}
+
+body.compact-mode .settings-panel {
+  width: 380px;
+}
+
+body.compact-mode .sfield {
+  margin-bottom: 10px;
+}
 
 /* ── Cron Jobs section (center column) ──────────────────────────────────── */
 .cron-section {

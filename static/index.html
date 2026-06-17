@@ -317,9 +317,24 @@
       <input id="cfg-port" type="number" class="sfield-input" placeholder="7979" min="1024" max="65535">
     </div>
     <div class="sfield">
+      <div class="sfield-label">Web UI Host <span class="restart-badge">↺ restart</span></div>
+      <div class="sfield-hint">Bind address. Use 127.0.0.1 for local-only, 0.0.0.0 to expose on the LAN.</div>
+      <input id="cfg-host" type="text" class="sfield-input sfield-mono" placeholder="127.0.0.1">
+    </div>
+    <div class="sfield">
       <div class="sfield-label">Extra Hermes Home</div>
       <div class="sfield-hint">Optional second hermes home to watch alongside the primary (HERMES_EXTRA_HOME)</div>
       <input id="cfg-extra-home" type="text" class="sfield-input sfield-mono" placeholder="/tmp/hermes-other/home">
+    </div>
+    <div class="sfield">
+      <div class="sfield-label">Agent Launchd Plists <span class="restart-badge">↺ restart</span></div>
+      <div class="sfield-hint">Optional comma map: agent=/path/to/plist,other=/path/to/plist</div>
+      <input id="cfg-agent-plists" type="text" class="sfield-input sfield-mono" placeholder="sage=~/Library/LaunchAgents/ai.hermes.gateway.plist">
+    </div>
+    <div class="sfield">
+      <div class="sfield-label">Agent Launchd Labels <span class="restart-badge">↺ restart</span></div>
+      <div class="sfield-hint">Optional comma map: agent=launchd.label,other=launchd.label</div>
+      <input id="cfg-agent-labels" type="text" class="sfield-input sfield-mono" placeholder="sage=ai.hermes.gateway">
     </div>
     <div class="sfield-actions">
       <button class="sbtn sbtn-primary" onclick="saveSettings('connection')">Save Connection</button>
@@ -348,6 +363,16 @@
       <div class="sfield-label">Warmup Freshness (seconds)</div>
       <div class="sfield-hint">Sessions older than this skip replay on reconnect. Default: 21600 (6 h)</div>
       <input id="cfg-warmup" type="number" class="sfield-input" placeholder="21600" min="60">
+    </div>
+    <div class="sfield">
+      <div class="sfield-label">Media Directory <span class="restart-badge">↺ restart</span></div>
+      <div class="sfield-hint">Directory to scan for generated media outside agent workspaces (HERMES_MEDIA_DIR)</div>
+      <input id="cfg-media-dir" type="text" class="sfield-input sfield-mono" placeholder="~/.hermes/cache/images">
+    </div>
+    <div class="sfield">
+      <div class="sfield-label">Media Agent <span class="restart-badge">↺ restart</span></div>
+      <div class="sfield-hint">Agent ID used to attribute files found in the media directory</div>
+      <input id="cfg-media-agent" type="text" class="sfield-input" placeholder="imagine">
     </div>
     <div class="sfield-actions">
       <button class="sbtn sbtn-primary" onclick="saveSettings('monitoring')">Save Monitoring</button>
