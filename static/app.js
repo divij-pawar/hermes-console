@@ -2060,7 +2060,6 @@ async function loadSettingsValues() {
     _setVal('cfg-docker',       s.docker_container || '');
     _setVal('cfg-port',         s.webui_port     || 7979);
     _setVal('cfg-host',         s.webui_host     || '127.0.0.1');
-    _setVal('cfg-extra-home',   s.extra_home     || '');
     _setVal('cfg-agent-plists', s.agent_plists   || '');
     _setVal('cfg-agent-labels', s.agent_labels   || '');
 
@@ -2141,7 +2140,6 @@ async function saveSettings(tab) {
       docker_container: document.getElementById('cfg-docker')?.value        || '',
       webui_port:       parseInt(document.getElementById('cfg-port')?.value || 7979),
       webui_host:       document.getElementById('cfg-host')?.value          || '',
-      extra_home:       document.getElementById('cfg-extra-home')?.value    || '',
       agent_plists:     document.getElementById('cfg-agent-plists')?.value  || '',
       agent_labels:     document.getElementById('cfg-agent-labels')?.value  || '',
     }),

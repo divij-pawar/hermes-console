@@ -38,8 +38,9 @@ The only required value is `HERMES_DIR`. Everything else has a working default.
 ### 2. Start
 
 ```bash
-python3 server.py
-open http://localhost:7979
+./start.sh
+# or: python3 server.py
+open http://localhost:7979   # or whatever HERMES_WEBUI_PORT is set to
 ```
 
 No pip dependencies — stdlib only.
@@ -60,11 +61,10 @@ cp .env.example .env
 | `HERMES_ORCHESTRATOR` | `sage` | Root agent name — the one whose sessions live directly in `HERMES_DIR` rather than under `profiles/<name>`. Change this if your workflow uses a different name for the default agent. |
 | `HERMES_WEBUI_PORT` | `7979` | HTTP port the dashboard listens on. |
 | `HERMES_WEBUI_HOST` | `127.0.0.1` | Bind address. Use `0.0.0.0` only when intentionally exposing the console on a network. |
-| `HERMES_MONITOR_DB` | `<web-ui>/monitor.db` | SQLite file for API usage events and prompt traces. Set a different path when running two instances so they don't share data. |
+| `HERMES_MONITOR_DB` | `<web-ui>/monitor.db` | SQLite file for API usage events and prompt traces. |
 | `HERMES_DOCKER_CONTAINER` | _(unset)_ | Docker container name. When set, start/stop/restart buttons use `docker` commands instead of `launchctl`. Leave blank for a native macOS launchd-managed gateway. |
 | `HERMES_AGENT_PLISTS` | sage/imagine defaults | Optional comma map for native launchd gateways, e.g. `sage=~/Library/LaunchAgents/ai.hermes.gateway.plist`. |
 | `HERMES_AGENT_LABELS` | sage/imagine defaults | Optional comma map for launchd labels, e.g. `sage=ai.hermes.gateway`. |
-| `HERMES_EXTRA_HOME` | _(unset)_ | Second Hermes home to monitor alongside the primary one. Use this to show both production and lab agents in a single dashboard. |
 | `HERMES_BACKUP_REPO` | _(unset)_ | Git repo path containing `backup.sh`. Enables the backup panel. Leave blank to hide it. |
 | `HERMES_BACKUP_SCRIPT` | _(auto)_ | Path to `backup.sh`. Auto-detected as `HERMES_BACKUP_REPO/backup.sh` if not set. |
 | `SLACK_BOT_TOKEN` | _(unset)_ | Slack bot token (`xoxb-…`) for the trace mirror. Falls back to reading `HERMES_DIR/.env`. |
@@ -95,85 +95,12 @@ The frontend bootstraps the agent list from `/api/agents` on page load.
 
 ---
 
-## Running two instances — production + Docker lab
-
-Start two separate monitor instances on different ports, each with its own config.
-
-### Instance 1 — production (port 7979)
-
-```bash
-cp .env.example .env
-# Edit .env — HERMES_DIR=~/.hermes, HERMES_WEBUI_PORT=7979
-python3 server.py
-```
-
-### Instance 2 — Docker lab (port 7980)
-
-```bash
-cp .env.lab.example .env.lab
-# Edit .env.lab — set HERMES_DIR, HERMES_DOCKER_CONTAINER
-./start-lab.sh
-```
-
-`start-lab.sh` loads `.env.lab` automatically. The lab instance gets its own
-isolated monitor DB, port, and Docker container control — no production data
-bleeds in.
-
----
-
-## Docker lab setup (`.env.lab`)
-
-```bash
-cp .env.lab.example .env.lab
-```
-
-Key values to fill in:
-
-```bash
-# Host-side path to the container's bind-mounted Hermes home
-HERMES_DIR=/tmp/hermes-anton-lab/home
-
-# Must differ from the production monitor port
-HERMES_WEBUI_PORT=7980
-
-# Container name from docker-compose.anton.yml
-HERMES_DOCKER_CONTAINER=hermes-anton-lab
-```
-
-The monitor runs entirely on the **host** — no Docker exec or port forwarding needed.
-It reads the bind-mounted files directly.
-
-```
-Mac Mini host
-├── python3 server.py (port 7979)   ← reads ~/.hermes (production)
-├── ./start-lab.sh   (port 7980)    ← reads /tmp/hermes-anton-lab/home (lab)
-└── Docker
-    └── hermes-anton container
-        └── /lab → /tmp/hermes-anton-lab (bind-mount)
-```
-
-Prerequisites:
-1. Container is running: `docker compose -f docker/docker-compose.anton.yml up`
-2. Bind-mount path exists: `ls /tmp/hermes-anton-lab/home`
-
-```bash
-./start-lab.sh
-
-# Override port if 7980 is taken
-./start-lab.sh --port 7981
-
-# Override lab home path
-./start-lab.sh --lab-home /some/other/path
-```
-
----
-
 ## Dropping into a new Hermes workflow
 
 1. Copy this `web-ui/` folder into the new project
 2. `cp .env.example .env`
-3. Fill in `HERMES_DIR`, `HERMES_ORCHESTRATOR`, `HERMES_WEBUI_PORT`
-4. `python3 server.py`
+3. Set `HERMES_DIR` to your Hermes home (native path or Docker bind-mount)
+4. `./start.sh` or `python3 server.py`
 
 Agent discovery, log paths, kanban DB, and API provider detection all resolve
 from `HERMES_DIR` automatically. Nothing else to change.
@@ -182,7 +109,7 @@ from `HERMES_DIR` automatically. Nothing else to change.
 
 ## Slack trace mirror
 
-When `SLACK_BOT_TOKEN` and `SLACK_TRACE_CHANNEL` are set, the monitor mirrors
+When `SLACK_BOT_TOKEN` and `SLACK_TRACE_CHANNEL` are set, the console mirrors
 high-signal events to Slack.
 
 **Milestones mode** (default): user ask, kanban create/claim/done, blocked, delivered.
@@ -213,7 +140,7 @@ after saving env-backed settings so the Python process reloads them.
 | Agent Launchd Labels | `HERMES_AGENT_LABELS` | Optional comma map of agent → launchd label |
 | Backup Repo Path | `HERMES_BACKUP_REPO` | Git repo containing `backup.sh` |
 
-Click **Save** to write `.env.local`; restart the monitor to apply server-side
+Click **Save** to write `.env.local`; restart the console to apply server-side
 changes.
 
 ### Appearance tab
@@ -261,13 +188,11 @@ Stored in `localStorage` — no server round-trip needed.
 ```
 server.py            HTTP + SSE backend. Loads .env on startup, then spawns a
                      Watcher thread that polls JSONL, logs, state.db, kanban.db.
-.env.example         Template for production config — copy to .env.
-.env.lab.example     Template for Docker lab config — copy to .env.lab.
-start.sh             Start production monitor (wrapper around restart.sh).
-start-lab.sh         Start lab monitor — loads .env.lab, uses Docker control.
-restart.sh           Restart if running, start if not (launchd-managed).
-start-fleet.sh       Full fleet startup: Sage + Imagine gateways + Monitor.
-stop.sh              Stop the monitor service.
+.env.example         Template config — copy to .env.
+start.sh             Start the console in the background.
+restart.sh           Restart the console (or start if stopped).
+stop.sh              Stop the console (gateways unchanged).
+_lib.sh              Shared helpers for start/stop/restart.
 watch_agents.py      Standalone terminal trajectory viewer (tails session JSONL).
 static/
   index.html         Single-page app shell.
