@@ -50,6 +50,7 @@ html, body {
     "left   center right";
   height: 100vh;
   overflow: hidden;
+  transition: grid-template-columns 0.2s ease;
 }
 
 #right-sidebar {
@@ -134,10 +135,33 @@ html, body {
 
 #center {
   grid-area: center;
-  display: grid;
-  grid-template-rows: auto minmax(180px, 30%) auto 1fr;
+  display: flex;
+  flex-direction: column;
   overflow: hidden;
   min-width: 0;
+}
+
+#health-panel {
+  flex-shrink: 0;
+}
+
+#kanban, #cron-panel, #feed {
+  min-height: 0;
+}
+
+.center-resizer {
+  height: 5px;
+  flex-shrink: 0;
+  cursor: ns-resize;
+  background: transparent;
+  border-top: 1px solid var(--border);
+  transition: background 0.15s;
+  position: relative;
+  z-index: 1;
+}
+.center-resizer:hover,
+.center-resizer.dragging {
+  background: color-mix(in srgb, var(--accent) 30%, transparent);
 }
 
 /* ── Health panel ─────────────────────────────────────────────────────────── */
@@ -2042,6 +2066,86 @@ body.light-mode {
 
 body.compact-mode {
   font-size: 12px;
+}
+
+/* ── Sidebar panels content wrapper ─────────────────────────────────────── */
+
+.sidebar-panels-content {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  min-height: 0;
+}
+
+/* ── Sidebar collapse ────────────────────────────────────────────────────── */
+
+/* Toggle button sits at the top of each sidebar */
+.sidebar-toggle-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 28px;
+  flex-shrink: 0;
+  background: var(--surface2, #1c2128);
+  border: none;
+  border-bottom: 1px solid var(--border);
+  color: var(--dim);
+  cursor: pointer;
+  gap: 6px;
+  opacity: 0.8;
+  transition: opacity 0.15s, background 0.15s;
+}
+.sidebar-toggle-btn:hover {
+  opacity: 1;
+  background: color-mix(in srgb, var(--accent) 12%, var(--surface2, #1c2128));
+}
+.sidebar-toggle-icon {
+  display: block;
+  flex-shrink: 0;
+}
+
+/* Collapsed states */
+body.left-collapsed #app {
+  grid-template-columns: 28px 1fr 260px;
+}
+body.left-collapsed #left-sidebar .sidebar-panels-content {
+  display: none;
+}
+body.left-collapsed #left-sidebar {
+  overflow: visible;
+}
+body.left-collapsed #left-sidebar .sidebar-toggle-btn {
+  height: 100%;
+  width: 28px;
+  border-bottom: none;
+  border-right: 1px solid var(--border);
+}
+
+body.right-collapsed #app {
+  grid-template-columns: 240px 1fr 28px;
+}
+body.right-collapsed #right-sidebar .sidebar-panels-content {
+  display: none;
+}
+body.right-collapsed #right-sidebar {
+  overflow: visible;
+}
+body.right-collapsed #right-sidebar .sidebar-toggle-btn {
+  height: 100%;
+  width: 28px;
+  border-bottom: none;
+  border-left: 1px solid var(--border);
+}
+
+body.compact-mode.left-collapsed #app,
+body.left-collapsed.compact-mode #app {
+  grid-template-columns: 28px 1fr 230px;
+}
+body.compact-mode.right-collapsed #app,
+body.right-collapsed.compact-mode #app {
+  grid-template-columns: 210px 1fr 28px;
 }
 
 body.compact-mode #app {
