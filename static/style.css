@@ -50,7 +50,6 @@ html, body {
     "left   center right";
   height: 100vh;
   overflow: hidden;
-  transition: grid-template-columns 0.2s ease;
 }
 
 #right-sidebar {
@@ -62,21 +61,44 @@ html, body {
   flex-direction: column;
   height: 100%;
   min-height: 0;
+  position: relative;
 }
 #right-sidebar #usage-panel {
   border-bottom: none;
 }
 
 .sidebar-panel {
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  grid-template-rows: auto 1fr;
   overflow: hidden;
-  min-height: 48px;
   flex: 0 0 auto;
+  /* Animate both the inner grid row and the outer flex height together */
+  transition: grid-template-rows 0.2s ease, flex-basis 0.2s ease;
+}
+
+.sidebar-panel:not(.panel-collapsed) {
+  min-height: 48px;
+}
+
+.sidebar-panel.panel-collapsed {
+  grid-template-rows: auto 0fr;
+  /* min-height comes from readCollapsedHeight() via JS; reset CSS min-height */
+  min-height: 0;
+}
+
+/* Hide resizer gaps when the adjacent panel is collapsed */
+.panel-collapsed + .panel-resizer {
+  flex-basis: 0 !important;
+  min-height: 0;
+  overflow: hidden;
+}
+.panel-resizer:has(+ .panel-collapsed) {
+  flex-basis: 0 !important;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .sidebar-panel .panel-body {
-  flex: 1;
   min-height: 0;
   overflow-y: auto;
 }
@@ -85,7 +107,6 @@ html, body {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  flex-shrink: 0;
 }
 
 .panel-resizer {
@@ -126,7 +147,7 @@ html, body {
 }
 
 .panel-collapsed .panel-body {
-  display: none;
+  min-height: 0;
 }
 
 .panel-collapsed .panel-title {
@@ -452,15 +473,13 @@ html, body {
   overflow: hidden;
   height: 100%;
   min-height: 0;
+  position: relative;
 }
 
 /* ── Agents Panel ────────────────────────────────────────────────────────── */
 
 #agents-panel {
   padding: 12px;
-  display: flex;
-  flex-direction: column;
-  gap: 0;
   border-bottom: 1px solid var(--border);
 }
 
@@ -562,8 +581,6 @@ html, body {
 /* ── Files Panel ─────────────────────────────────────────────────────────── */
 
 #files-panel {
-  display: flex;
-  flex-direction: column;
   overflow: hidden;
   background: var(--surface);
   padding: 0 12px 12px;
@@ -682,14 +699,20 @@ html, body {
   min-height: 0;
 }
 
-.feed-header {
+/* Shared section header base — applies to feed, kanban, and cron panel titles */
+.feed-header,
+.kanban-header,
+.cron-section > .cron-panel-title {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 10px 16px;
   border-bottom: 1px solid var(--border);
-  background: var(--surface);
   flex-shrink: 0;
+}
+
+.feed-header {
+  padding: 10px 16px;
+  background: var(--surface);
 }
 
 .feed-title {
@@ -704,6 +727,22 @@ html, body {
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+.event-body {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1;
+  gap: 1px;
+}
+
+.event-detail {
+  font-size: 0.78em;
+  color: var(--dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .feed-count {
@@ -742,7 +781,7 @@ html, body {
 
 .event-row {
   display: flex;
-  align-items: baseline;
+  align-items: flex-start;
   gap: 8px;
   padding: 5px 16px;
   border-radius: 4px;
@@ -775,6 +814,7 @@ html, body {
   color: #484f58;
   flex-shrink: 0;
   min-width: 68px;
+  margin-top: 1px;
 }
 
 .agent-badge {
@@ -828,15 +868,6 @@ html, body {
 }
 
 /* ── Logs Panel ──────────────────────────────────────────────────────────── */
-
-#logs {
-  grid-area: logs;
-  display: flex;
-  flex-direction: column;
-  border-left: 1px solid var(--border);
-  background: var(--surface);
-  overflow: hidden;
-}
 
 .log-tabs {
   display: flex;
@@ -1235,8 +1266,6 @@ html, body {
 
 #backup-panel {
   padding: 10px 12px 12px;
-  border-top: none;
-  flex-shrink: 0;
 }
 
 .backup-title {
@@ -1370,8 +1399,6 @@ html, body {
   overflow: hidden;
 }
 .kanban-header {
-  display: flex;
-  justify-content: space-between;
   align-items: baseline;
   padding: 10px 14px 6px;
 }
@@ -1662,6 +1689,8 @@ html, body {
   flex-direction: column;
   gap: 2px;
   overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
 }
 #activity-list::-webkit-scrollbar { width: 4px; }
 #activity-list::-webkit-scrollbar-track { background: transparent; }
@@ -1740,10 +1769,6 @@ html, body {
   letter-spacing: 0.06em;
   color: var(--text-muted, #8b949e);
   margin-bottom: 4px;
-}
-#activity-list {
-  scrollbar-width: thin;
-  scrollbar-color: var(--border) transparent;
 }
 .log-popover-section { margin-bottom: 10px; }
 
@@ -2034,9 +2059,6 @@ html, body {
   border: 1px solid var(--border, #2d333b);
 }
 
-/* Hide vestigial relay-controls if any remain in styling — safe no-op */
-.relay-controls, .relay-badge { display: none !important; }
-
 /* ── Appearance mode overrides ─────────────────────────────────────────────── */
 body.dark-mode {
   --bg:        #0d1117;
@@ -2076,34 +2098,64 @@ body.compact-mode {
   flex-direction: column;
   overflow: hidden;
   min-height: 0;
+  transform-origin: left center;
+  transition: transform 0.18s ease, opacity 0.15s ease;
 }
 
 /* ── Sidebar collapse ────────────────────────────────────────────────────── */
 
-/* Toggle button sits at the top of each sidebar */
-.sidebar-toggle-btn {
+/* Sidebar toggle buttons live in the header toolbar */
+.header-sidebar-btn {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 100%;
-  height: 28px;
-  flex-shrink: 0;
-  background: var(--surface2, #1c2128);
+  background: none;
   border: none;
-  border-bottom: 1px solid var(--border);
-  color: var(--dim);
   cursor: pointer;
-  gap: 6px;
-  opacity: 0.8;
+  color: var(--dim);
+  padding: 5px 7px;
+  border-radius: 5px;
+  opacity: 0.65;
   transition: opacity 0.15s, background 0.15s;
+  flex-shrink: 0;
 }
-.sidebar-toggle-btn:hover {
+.header-sidebar-btn:hover {
   opacity: 1;
-  background: color-mix(in srgb, var(--accent) 12%, var(--surface2, #1c2128));
+  background: rgba(255, 255, 255, 0.08);
+}
+body.left-collapsed #left-collapse-btn,
+body.right-collapsed #right-collapse-btn {
+  opacity: 0.4;
 }
 .sidebar-toggle-icon {
   display: block;
   flex-shrink: 0;
+}
+
+/* Header right-side control group */
+.header-right-controls {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+/* Expand strip — shown inside the slim 28 px collapsed sidebar strip */
+.sidebar-expand-strip {
+  display: none;
+  position: absolute;
+  inset: 0;
+  cursor: pointer;
+  align-items: center;
+  justify-content: center;
+  color: var(--dim);
+  font-size: 16px;
+  opacity: 0;
+  transition: opacity 0.15s;
+  z-index: 1;
+}
+.sidebar-expand-strip:hover {
+  opacity: 0.8;
+  background: rgba(255, 255, 255, 0.04);
 }
 
 /* Collapsed states */
@@ -2111,32 +2163,43 @@ body.left-collapsed #app {
   grid-template-columns: 28px 1fr 260px;
 }
 body.left-collapsed #left-sidebar .sidebar-panels-content {
-  display: none;
+  transform: scaleX(0);
+  opacity: 0;
+  pointer-events: none;
 }
 body.left-collapsed #left-sidebar {
-  overflow: visible;
+  position: relative;
+  overflow: hidden;
+  cursor: default;
 }
-body.left-collapsed #left-sidebar .sidebar-toggle-btn {
-  height: 100%;
-  width: 28px;
-  border-bottom: none;
-  border-right: 1px solid var(--border);
+body.left-collapsed #left-sidebar .sidebar-expand-strip {
+  display: flex;
+  opacity: 0.35;
+}
+body.left-collapsed #left-sidebar .sidebar-expand-strip::after {
+  content: "›";
 }
 
 body.right-collapsed #app {
   grid-template-columns: 240px 1fr 28px;
 }
 body.right-collapsed #right-sidebar .sidebar-panels-content {
-  display: none;
+  transform-origin: right center;
+  transform: scaleX(0);
+  opacity: 0;
+  pointer-events: none;
 }
 body.right-collapsed #right-sidebar {
-  overflow: visible;
+  position: relative;
+  overflow: hidden;
+  cursor: default;
 }
-body.right-collapsed #right-sidebar .sidebar-toggle-btn {
-  height: 100%;
-  width: 28px;
-  border-bottom: none;
-  border-left: 1px solid var(--border);
+body.right-collapsed #right-sidebar .sidebar-expand-strip {
+  display: flex;
+  opacity: 0.35;
+}
+body.right-collapsed #right-sidebar .sidebar-expand-strip::after {
+  content: "‹";
 }
 
 body.compact-mode.left-collapsed #app,
@@ -2230,12 +2293,7 @@ body.compact-mode .sfield {
   padding: 7px 14px;
   font-size: 0.85em;
   font-weight: 600;
-  flex-shrink: 0;
   background: var(--surface2);
-  border-bottom: 1px solid var(--border);
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
 }
 
 .cron-section > .panel-body {
@@ -2244,7 +2302,7 @@ body.compact-mode .sfield {
 }
 
 .cron-section.panel-collapsed > .panel-body {
-  display: none;
+  min-height: 0;
 }
 
 .cron-table-wrap { overflow-x: auto; }

@@ -199,11 +199,20 @@ document.addEventListener("DOMContentLoaded", () => {
     });
 
   setupCollapsiblePanels();
+  restoreSidebarCollapse();
   setupKanbanCardActions();
   setupSidebarResizers("left-sidebar", ["agents-panel", "files-panel", "backup-panel"],
     "hermes-monitor:left-heights", [0.45, 0.35, 0.20]);
   setupSidebarResizers("right-sidebar", ["usage-panel", "prompt-trace-panel", "activity-panel"],
     "hermes-monitor:right-heights", [1 / 3, 1 / 3, 1 / 3]);
+  setupCenterResizers();
+
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") {
+      const modal = document.getElementById("file-modal");
+      if (modal && modal.classList.contains("open")) closeFileViewer();
+    }
+  });
 
   document.getElementById("health-issues")?.addEventListener("click", (e) => {
     const btn = e.target.closest(".issue-dismiss");
@@ -398,6 +407,16 @@ function activityToolLabel(tool) {
   return tool;
 }
 
+function activityDetailText(row) {
+  const extra = row.extra || {};
+  const raw = extra.query || extra.url || extra.display_path || extra.path || row.detail || "";
+  if (!raw) return "";
+  const text = String(raw);
+  if (text.startsWith("query=")) return text.slice(6);
+  if (text.startsWith("url=")) return text.slice(4);
+  return text;
+}
+
 function activityToolClass(tool) {
   if (tool === "read_file") return "read";
   if (tool === "memory:search") return "memory-search";
@@ -460,7 +479,7 @@ function renderActivity(data) {
     const agent = row.agent || "unknown";
     const meta = _metaFor(agent);
     const toolClass = activityToolClass(row.tool);
-    const detail = row.detail || "";
+    const detail = activityDetailText(row);
     const extra = row.extra || {};
     const result = extra.result || extra.result_preview || "";
     const duration = Number.isFinite(row.duration_ms) && row.duration_ms > 0
@@ -1256,6 +1275,25 @@ function setupCollapsiblePanels() {
 
 const sidebarResizers = {};
 
+// Single module-level resize dispatcher — avoids stacking a new window listener
+// every time a resizer setup function is called.
+const _resizeCallbacks = new Map(); // key → fn
+(function _initResizeDispatcher() {
+  let scheduled = false;
+  window.addEventListener("resize", () => {
+    if (scheduled) return;
+    scheduled = true;
+    requestAnimationFrame(() => {
+      scheduled = false;
+      _resizeCallbacks.forEach(fn => { try { fn(); } catch (_) {} });
+    });
+  }, { passive: true });
+})();
+
+function _registerResizeCallback(key, fn) {
+  _resizeCallbacks.set(key, fn);
+}
+
 function setupSidebarResizers(sidebarId, panelIds, storageKey, defaultRatios) {
   const sidebar = document.getElementById(sidebarId);
   if (!sidebar) return;
@@ -1273,7 +1311,8 @@ function setupSidebarResizers(sidebarId, panelIds, storageKey, defaultRatios) {
     return panel.classList.contains("panel-collapsed");
   }
 
-  function collapsedHeight(panel) {
+  // Read collapsed heights once (no live reads inside drag loop).
+  function readCollapsedHeight(panel) {
     const title = panel.querySelector(".panel-title");
     if (!title) return MIN_COLLAPSED;
     const style = getComputedStyle(panel);
@@ -1282,16 +1321,13 @@ function setupSidebarResizers(sidebarId, panelIds, storageKey, defaultRatios) {
   }
 
   function availableHeight() {
-    return sidebar.clientHeight - (panels.length - 1) * RESIZER_H;
+    const container = (panels.length > 0 && panels[0].parentElement) ? panels[0].parentElement : sidebar;
+    return container.clientHeight - (panels.length - 1) * RESIZER_H;
   }
 
   function applyHeights(heights) {
     panels.forEach((panel, i) => {
-      if (isCollapsed(panel)) {
-        panel.style.flex = `0 0 ${collapsedHeight(panel)}px`;
-      } else {
-        panel.style.flex = `0 0 ${heights[i]}px`;
-      }
+      panel.style.flex = `0 0 ${heights[i]}px`;
     });
   }
 
@@ -1308,6 +1344,7 @@ function setupSidebarResizers(sidebarId, panelIds, storageKey, defaultRatios) {
   }
 
   function initHeights() {
+    // Batch all layout reads before any writes.
     const total = availableHeight();
     let heights = loadHeights();
     if (heights && heights.length === panels.length) {
@@ -1320,6 +1357,10 @@ function setupSidebarResizers(sidebarId, panelIds, storageKey, defaultRatios) {
       const sum = heights.reduce((a, b) => a + b, 0);
       heights[heights.length - 1] += total - sum;
     }
+    // Reconcile collapsed panels so their slot matches their clamped size.
+    panels.forEach((panel, i) => {
+      if (isCollapsed(panel)) heights[i] = readCollapsedHeight(panel);
+    });
     applyHeights(heights);
     return heights;
   }
@@ -1335,29 +1376,36 @@ function setupSidebarResizers(sidebarId, panelIds, storageKey, defaultRatios) {
       e.preventDefault();
       const idx = i;
       const startY = e.clientY;
-      const startTop = isCollapsed(panels[idx]) ? collapsedHeight(panels[idx]) : heights[idx];
-      const startBottom = isCollapsed(panels[idx + 1]) ? collapsedHeight(panels[idx + 1]) : heights[idx + 1];
-      if (isCollapsed(panels[idx]) && isCollapsed(panels[idx + 1])) return;
+
+      // Pre-read all layout values once at drag-start, before any writes.
+      const collapsedTop    = isCollapsed(panels[idx])     ? readCollapsedHeight(panels[idx])     : null;
+      const collapsedBottom = isCollapsed(panels[idx + 1]) ? readCollapsedHeight(panels[idx + 1]) : null;
+      if (collapsedTop !== null && collapsedBottom !== null) return;
+
+      const startTop    = collapsedTop    ?? heights[idx];
+      const startBottom = collapsedBottom ?? heights[idx + 1];
+      const minTop      = collapsedTop    ?? MIN_EXPANDED;
+      const minBottom   = collapsedBottom ?? MIN_EXPANDED;
 
       resizer.classList.add("dragging");
+      let rafPending = false;
+      let lastY = startY;
 
       function onMove(ev) {
-        const dy = ev.clientY - startY;
-        let newTop = startTop + dy;
-        let newBottom = startBottom - dy;
-        const minTop = isCollapsed(panels[idx]) ? collapsedHeight(panels[idx]) : MIN_EXPANDED;
-        const minBottom = isCollapsed(panels[idx + 1]) ? collapsedHeight(panels[idx + 1]) : MIN_EXPANDED;
-        if (newTop < minTop) {
-          newBottom -= (minTop - newTop);
-          newTop = minTop;
-        }
-        if (newBottom < minBottom) {
-          newTop -= (minBottom - newBottom);
-          newBottom = minBottom;
-        }
-        if (!isCollapsed(panels[idx])) heights[idx] = newTop;
-        if (!isCollapsed(panels[idx + 1])) heights[idx + 1] = newBottom;
-        applyHeights(heights);
+        lastY = ev.clientY;
+        if (rafPending) return;
+        rafPending = true;
+        requestAnimationFrame(() => {
+          rafPending = false;
+          const dy = lastY - startY;
+          let newTop = startTop + dy;
+          let newBottom = startBottom - dy;
+          if (newTop < minTop)    { newBottom -= (minTop - newTop);       newTop = minTop; }
+          if (newBottom < minBottom) { newTop -= (minBottom - newBottom); newBottom = minBottom; }
+          if (collapsedTop    === null) heights[idx]     = newTop;
+          if (collapsedBottom === null) heights[idx + 1] = newBottom;
+          applyHeights(heights);
+        });
       }
 
       function onUp() {
@@ -1377,7 +1425,7 @@ function setupSidebarResizers(sidebarId, panelIds, storageKey, defaultRatios) {
     relayout: () => { heights = initHeights(); },
   };
 
-  window.addEventListener("resize", () => {
+  _registerResizeCallback(`sidebar:${sidebarId}`, () => {
     const ctrl = sidebarResizers[sidebarId];
     if (ctrl?.relayout) ctrl.relayout();
   });
@@ -1385,6 +1433,160 @@ function setupSidebarResizers(sidebarId, panelIds, storageKey, defaultRatios) {
 
 function refreshSidebarLayouts() {
   Object.values(sidebarResizers).forEach(ctrl => ctrl.refresh && ctrl.refresh());
+}
+
+// ── Whole-sidebar collapse ──────────────────────────────────────────────────
+
+function toggleSidebar(side) {
+  const cls = side === "left" ? "left-collapsed" : "right-collapsed";
+  const isCollapsed = document.body.classList.toggle(cls);
+  localStorage.setItem(`hermes-monitor:${side}-sidebar-collapsed`, isCollapsed ? "1" : "0");
+
+  const btn = document.getElementById(`${side}-collapse-btn`);
+  if (btn) {
+    btn.title = isCollapsed
+      ? `Expand ${side} sidebar`
+      : `Collapse ${side} sidebar`;
+    // Mirror the SVG horizontally when collapsed to indicate expand direction
+    const icon = btn.querySelector(".sidebar-toggle-icon");
+    if (icon) icon.style.transform = isCollapsed ? "scaleX(-1)" : "";
+  }
+
+  // Grid column reflow is synchronous; re-measure immediately.
+  refreshSidebarLayouts();
+}
+
+function restoreSidebarCollapse() {
+  ["left", "right"].forEach(side => {
+    const val = localStorage.getItem(`hermes-monitor:${side}-sidebar-collapsed`);
+    if (val === "1") {
+      const cls = side === "left" ? "left-collapsed" : "right-collapsed";
+      document.body.classList.add(cls);
+      const btn = document.getElementById(`${side}-collapse-btn`);
+      if (btn) {
+        btn.title = `Expand ${side} sidebar`;
+        const icon = btn.querySelector(".sidebar-toggle-icon");
+        if (icon) icon.style.transform = "scaleX(-1)";
+      }
+    }
+  });
+}
+
+// ── Center column resizer (kanban / cron / feed) ────────────────────────────
+
+function setupCenterResizers() {
+  const center = document.getElementById("center");
+  if (!center) return;
+
+  const panels = ["kanban", "cron-panel", "feed"].map(id => document.getElementById(id)).filter(Boolean);
+  if (panels.length < 2) return;
+
+  center.querySelectorAll(".center-resizer").forEach(r => r.remove());
+
+  const RESIZER_H = 5;
+  const MIN_H = 80;
+  const STORAGE_KEY = "hermes-monitor:center-heights";
+
+  function availableHeight() {
+    const healthH = document.getElementById("health-panel")?.offsetHeight || 0;
+    return center.clientHeight - healthH - (panels.length - 1) * RESIZER_H;
+  }
+
+  function loadHeights() {
+    try {
+      const saved = localStorage.getItem(STORAGE_KEY);
+      if (saved) return JSON.parse(saved);
+    } catch (_) { /* ignore */ }
+    return null;
+  }
+
+  function saveHeights(heights) {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(heights));
+  }
+
+  function applyHeights(heights) {
+    panels.forEach((panel, i) => {
+      panel.style.flex = `0 0 ${heights[i]}px`;
+    });
+  }
+
+  function initHeights() {
+    const total = availableHeight();
+    // Default: kanban 30%, cron auto (120px min), feed gets the rest
+    const defaultRatios = [0.35, 0.18, 0.47];
+    let heights = loadHeights();
+    if (heights && heights.length === panels.length) {
+      const sum = heights.reduce((a, b) => a + b, 0);
+      if (sum > 0 && Math.abs(sum - total) > 2) {
+        heights = heights.map(h => Math.round(h * total / sum));
+      }
+    } else {
+      heights = defaultRatios.map(r => Math.max(MIN_H, Math.round(total * r)));
+      const sum = heights.reduce((a, b) => a + b, 0);
+      heights[heights.length - 1] += total - sum;
+    }
+    applyHeights(heights);
+    return heights;
+  }
+
+  let heights = initHeights();
+
+  for (let i = 0; i < panels.length - 1; i++) {
+    const resizer = document.createElement("div");
+    resizer.className = "center-resizer";
+    panels[i].after(resizer);
+
+    resizer.addEventListener("mousedown", (e) => {
+      e.preventDefault();
+      const idx = i;
+      const startY = e.clientY;
+      // Pre-read layout values once at drag-start.
+      const startTop = heights[idx];
+      const startBot = heights[idx + 1];
+
+      resizer.classList.add("dragging");
+      let rafPending = false;
+      let lastY = startY;
+
+      function onMove(ev) {
+        lastY = ev.clientY;
+        if (rafPending) return;
+        rafPending = true;
+        requestAnimationFrame(() => {
+          rafPending = false;
+          const dy = lastY - startY;
+          let newTop = startTop + dy;
+          let newBot = startBot - dy;
+          if (newTop < MIN_H) { newBot -= (MIN_H - newTop); newTop = MIN_H; }
+          if (newBot < MIN_H) { newTop -= (MIN_H - newBot); newBot = MIN_H; }
+          heights[idx] = newTop;
+          heights[idx + 1] = newBot;
+          applyHeights(heights);
+        });
+      }
+
+      function onUp() {
+        resizer.classList.remove("dragging");
+        saveHeights(heights);
+        document.removeEventListener("mousemove", onMove);
+        document.removeEventListener("mouseup", onUp);
+      }
+
+      document.addEventListener("mousemove", onMove);
+      document.addEventListener("mouseup", onUp);
+    });
+  }
+
+  _registerResizeCallback("center", () => { heights = initHeights(); });
+}
+
+function feedShowsDetail(ev) {
+  const detail = (ev.detail || "").trim();
+  const title = (ev.title || "").trim();
+  if (!detail) return false;
+  if (detail === title) return false;
+  if (title.includes(detail)) return false;
+  return true;
 }
 
 function appendFeedEvent(ev) {
@@ -1417,7 +1619,10 @@ function appendFeedEvent(ev) {
     <span class="event-ts">${escHtml(timeLabel)}</span>
     <span class="agent-badge badge-${ev.agent}">${escHtml(meta.label)}</span>
     <span class="event-icon">${icon}</span>
-    <span class="event-title" title="${escHtml(ev.detail || ev.title || '')}">${escHtml(ev.title || '')}</span>
+    <span class="event-body">
+      <span class="event-title" title="${escHtml(ev.detail || ev.title || '')}">${escHtml(ev.title || '')}</span>
+      ${feedShowsDetail(ev) ? `<span class="event-detail">${escHtml(ev.detail)}</span>` : ""}
+    </span>
     <span class="event-result-pill" style="display:none">result</span>
   `;
   if (ev.result_full) {
@@ -1776,8 +1981,7 @@ function openLogViewer(ev, rowEl) {
   }, 0);
 }
 
-function closeFileViewer(event) {
-  if (event && event.target !== document.getElementById("file-modal")) return;
+function closeFileViewer() {
   const modal = document.getElementById("file-modal");
   modal.classList.remove("open");
   document.getElementById("modal-body").innerHTML = "";
@@ -2301,3 +2505,4 @@ async function cronAction(id, action) {
 }
 
 loadCronJobs();
+setInterval(loadCronJobs, 30000);

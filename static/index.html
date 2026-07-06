@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Hermes Console</title>
   <link rel="stylesheet" href="/static/style.css" />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🪽</text></svg>">
 </head>
 <body>
 
@@ -12,6 +13,13 @@
 
   <!-- Header -->
   <header id="header">
+    <!-- Left sidebar toggle — leftmost toolbar item -->
+    <button class="header-sidebar-btn" id="left-collapse-btn" onclick="toggleSidebar('left')" title="Toggle left sidebar" aria-label="Toggle left sidebar">
+      <svg class="sidebar-toggle-icon" width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <rect x="1.75" y="1.75" width="12.5" height="12.5" rx="2" stroke="currentColor" stroke-width="1.5"/>
+        <line x1="5.5" y1="1.75" x2="5.5" y2="14.25" stroke="currentColor" stroke-width="1.5"/>
+      </svg>
+    </button>
     <div class="logo">
       <span class="logo-emoji">🪽</span>
       <span>Hermes Console</span>
@@ -31,60 +39,76 @@
       <span class="pill pill-blocked" title="blocked / scheduled">— blocked</span>
       <span class="pill pill-done"    title="done (lifetime)">— done</span>
     </div>
-    <button id="settings-btn" onclick="toggleSettings()" title="Settings" style="background:none;border:none;cursor:pointer;font-size:1.2em;color:inherit;padding:4px 8px;margin-left:8px">⚙</button>
+    <!-- Right sidebar toggle — grouped with settings at the far right -->
+    <div class="header-right-controls">
+      <button class="header-sidebar-btn" id="right-collapse-btn" onclick="toggleSidebar('right')" title="Toggle right sidebar" aria-label="Toggle right sidebar">
+        <svg class="sidebar-toggle-icon" width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <rect x="1.75" y="1.75" width="12.5" height="12.5" rx="2" stroke="currentColor" stroke-width="1.5"/>
+          <line x1="10.5" y1="1.75" x2="10.5" y2="14.25" stroke="currentColor" stroke-width="1.5"/>
+        </svg>
+      </button>
+      <button id="settings-btn" onclick="toggleSettings()" title="Settings" style="background:none;border:none;cursor:pointer;font-size:1.2em;color:inherit;padding:4px 8px;">⚙</button>
+    </div>
   </header>
 
   <!-- Left sidebar: agents + files + backup -->
   <aside id="left-sidebar">
 
-    <!-- Agents panel -->
-    <div id="agents-panel" class="sidebar-panel">
-      <div class="panel-title">
-        <span>Agents</span>
-        <div class="panel-title-actions">
-          <button class="panel-collapse-btn" type="button" data-collapse-target="agents-panel" aria-label="Toggle Agents panel" aria-expanded="true">⌃</button>
-        </div>
-      </div>
-      <div class="panel-body">
-        <div id="agent-cards"></div>
-      </div>
-    </div>
+    <!-- Expand strip: visible only when sidebar is collapsed; click to expand -->
+    <div class="sidebar-expand-strip" onclick="toggleSidebar('left')" title="Expand left sidebar" role="button" tabindex="0" aria-label="Expand left sidebar"></div>
 
-    <!-- Files panel -->
-    <div id="files-panel" class="sidebar-panel">
-      <div class="panel-title files-title">
-        <span>Generated Files</span>
-        <div class="panel-title-actions">
-          <span id="files-count" class="files-count">0</span>
-          <button class="panel-collapse-btn" type="button" data-collapse-target="files-panel" aria-label="Toggle Files panel" aria-expanded="true">⌃</button>
-        </div>
-      </div>
-      <div class="panel-body">
-        <div id="files-list">
-          <div class="files-empty" id="files-empty">No files yet</div>
-        </div>
-      </div>
-    </div>
+    <div class="sidebar-panels-content">
 
-    <!-- Backup panel (sf_agents git — not hermes backup zip) -->
-    <div id="backup-panel" class="sidebar-panel">
-      <div class="panel-title backup-title">
-        <span>Config backup</span>
-        <div class="panel-title-actions">
-          <span id="backup-dirty-badge" class="backup-dirty-badge" style="display:none" title="Uncommitted changes in the backup repo">uncommitted</span>
-          <button class="panel-collapse-btn" type="button" data-collapse-target="backup-panel" aria-label="Toggle Backup panel" aria-expanded="true">⌃</button>
+      <!-- Agents panel -->
+      <div id="agents-panel" class="sidebar-panel">
+        <div class="panel-title">
+          <span>Agents</span>
+          <div class="panel-title-actions">
+            <button class="panel-collapse-btn" type="button" data-collapse-target="agents-panel" aria-label="Toggle Agents panel" aria-expanded="true">⌃</button>
+          </div>
+        </div>
+        <div class="panel-body">
+          <div id="agent-cards"></div>
         </div>
       </div>
-      <div class="panel-body">
-        <div class="backup-repo" id="backup-repo" title=""></div>
-        <div id="backup-info">
-          <div class="backup-commit" id="backup-commit">Not configured</div>
-          <div class="backup-date" id="backup-date"></div>
+
+      <!-- Files panel -->
+      <div id="files-panel" class="sidebar-panel">
+        <div class="panel-title files-title">
+          <span>Generated Files</span>
+          <div class="panel-title-actions">
+            <span id="files-count" class="files-count">0</span>
+            <button class="panel-collapse-btn" type="button" data-collapse-target="files-panel" aria-label="Toggle Files panel" aria-expanded="true">⌃</button>
+          </div>
         </div>
-        <button class="btn btn-small btn-backup" id="btn-backup" onclick="runBackup()" title="Run backup.sh: ~/.hermes → sf_agents git commit">↑ Backup Now</button>
-        <div class="backup-hint">Full home zip: <code>hermes backup</code> in Terminal</div>
-        <div id="backup-output" class="backup-output" style="display:none"></div>
+        <div class="panel-body">
+          <div id="files-list">
+            <div class="files-empty" id="files-empty">No files yet</div>
+          </div>
+        </div>
       </div>
+
+      <!-- Backup panel (sf_agents git — not hermes backup zip) -->
+      <div id="backup-panel" class="sidebar-panel">
+        <div class="panel-title backup-title">
+          <span>Config backup</span>
+          <div class="panel-title-actions">
+            <span id="backup-dirty-badge" class="backup-dirty-badge" style="display:none" title="Uncommitted changes in the backup repo">uncommitted</span>
+            <button class="panel-collapse-btn" type="button" data-collapse-target="backup-panel" aria-label="Toggle Backup panel" aria-expanded="true">⌃</button>
+          </div>
+        </div>
+        <div class="panel-body">
+          <div class="backup-repo" id="backup-repo" title=""></div>
+          <div id="backup-info">
+            <div class="backup-commit" id="backup-commit">Not configured</div>
+            <div class="backup-date" id="backup-date"></div>
+          </div>
+          <button class="btn btn-small btn-backup" id="btn-backup" onclick="runBackup()" title="Run backup.sh: ~/.hermes → sf_agents git commit">↑ Backup Now</button>
+          <div class="backup-hint">Full home zip: <code>hermes backup</code> in Terminal</div>
+          <div id="backup-output" class="backup-output" style="display:none"></div>
+        </div>
+      </div>
+
     </div>
 
   </aside>
@@ -190,53 +214,61 @@
 
   <!-- Right sidebar: token usage + room for future panels -->
   <aside id="right-sidebar">
-    <div id="usage-panel" class="sidebar-panel">
-      <div class="panel-title usage-title">
-        <span>Usage</span>
-        <div class="panel-title-actions">
-          <span id="usage-credit" class="usage-credit" title="OpenRouter remaining credit">—</span>
-          <button class="panel-collapse-btn" type="button" data-collapse-target="usage-panel" aria-label="Toggle Usage panel" aria-expanded="true">⌃</button>
-        </div>
-      </div>
-      <div class="panel-body">
-        <div id="usage-provider-cards"></div>
-        <div id="usage-active"></div>
-        <details class="usage-history-wrap">
-          <summary>history</summary>
-          <div id="usage-history"></div>
-        </details>
-      </div>
-    </div>
 
-    <div id="prompt-trace-panel" class="sidebar-panel">
-      <div class="panel-title prompt-trace-title">
-        <span>Prompt Trace</span>
-        <div class="panel-title-actions">
-          <span id="prompt-trace-count" class="prompt-trace-count">0</span>
-          <button class="panel-collapse-btn" type="button" data-collapse-target="prompt-trace-panel" aria-label="Toggle Prompt Trace panel" aria-expanded="true">⌃</button>
-        </div>
-      </div>
-      <div class="panel-body">
-        <div id="prompt-trace-list">
-          <div class="prompt-trace-empty">No Slack prompt traces yet</div>
-        </div>
-      </div>
-    </div>
+    <!-- Expand strip: visible only when sidebar is collapsed; click to expand -->
+    <div class="sidebar-expand-strip" onclick="toggleSidebar('right')" title="Expand right sidebar" role="button" tabindex="0" aria-label="Expand right sidebar"></div>
 
-    <div id="activity-panel" class="sidebar-panel">
-      <div class="panel-title activity-title">
-        <span>Tool Activity</span>
-        <div class="panel-title-actions">
-          <span id="activity-status" class="activity-status">—</span>
-          <button class="panel-collapse-btn" type="button" data-collapse-target="activity-panel" aria-label="Toggle Tool Activity panel" aria-expanded="true">⌃</button>
+    <div class="sidebar-panels-content">
+
+      <div id="usage-panel" class="sidebar-panel">
+        <div class="panel-title usage-title">
+          <span>Usage</span>
+          <div class="panel-title-actions">
+            <span id="usage-credit" class="usage-credit" title="OpenRouter remaining credit">—</span>
+            <button class="panel-collapse-btn" type="button" data-collapse-target="usage-panel" aria-label="Toggle Usage panel" aria-expanded="true">⌃</button>
+          </div>
+        </div>
+        <div class="panel-body">
+          <div id="usage-provider-cards"></div>
+          <div id="usage-active"></div>
+          <details class="usage-history-wrap">
+            <summary>history</summary>
+            <div id="usage-history"></div>
+          </details>
         </div>
       </div>
-      <div class="panel-body">
-        <div class="activity-summary" id="activity-summary"></div>
-        <div id="activity-list">
-          <div class="activity-empty">No memory or file activity yet</div>
+
+      <div id="prompt-trace-panel" class="sidebar-panel">
+        <div class="panel-title prompt-trace-title">
+          <span>Prompt Trace</span>
+          <div class="panel-title-actions">
+            <span id="prompt-trace-count" class="prompt-trace-count">0</span>
+            <button class="panel-collapse-btn" type="button" data-collapse-target="prompt-trace-panel" aria-label="Toggle Prompt Trace panel" aria-expanded="true">⌃</button>
+          </div>
+        </div>
+        <div class="panel-body">
+          <div id="prompt-trace-list">
+            <div class="prompt-trace-empty">No Slack prompt traces yet</div>
+          </div>
         </div>
       </div>
+
+      <div id="activity-panel" class="sidebar-panel">
+        <div class="panel-title activity-title">
+          <span>Tool Activity</span>
+          <div class="panel-title-actions">
+            <span id="activity-status" class="activity-status">—</span>
+            <button class="panel-collapse-btn" type="button" data-collapse-target="activity-panel" aria-label="Toggle Tool Activity panel" aria-expanded="true">⌃</button>
+          </div>
+        </div>
+        <div class="panel-body">
+          <div class="activity-summary" id="activity-summary"></div>
+          <div id="activity-list">
+            <div class="activity-empty">No memory or file activity yet</div>
+          </div>
+        </div>
+      </div>
+
     </div>
   </aside>
 
@@ -246,7 +278,7 @@
 <div id="conn-status"></div>
 
 <!-- File viewer modal -->
-<div id="file-modal" class="modal-backdrop" onclick="closeFileViewer(event)">
+<div id="file-modal" class="modal-backdrop" onclick="closeFileViewer()">
   <div class="modal-box" onclick="event.stopPropagation()">
     <div class="modal-header">
       <div class="modal-title">

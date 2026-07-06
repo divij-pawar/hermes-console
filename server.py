@@ -1125,6 +1125,19 @@ trace_queue: queue.Queue = queue.Queue(maxsize=500)
 _trace_milestone_seen: set[tuple[str, str]] = set()
 _trace_incident_seen: dict[str, float] = {}
 _memory_search_pending: dict[str, str] = {}  # tool_call_id → query label
+# call_id → {name, detail, agent} — enriches tool_result feed titles with intent
+_tool_call_context: dict[str, dict] = {}
+# Suppress redundant live-log tool rows when structured session events already surfaced.
+_FEED_TOOL_DEDUPE_TTL_S = 120
+_feed_tool_dedupe: dict[tuple, float] = {}
+# Tools whose lifecycle is tracked via session jsonl/state.db — skip agent.log echoes.
+_STRUCTURED_LOG_TOOLS = frozenset({
+    "web_search", "web_fetch", "web_extract", "x_search",
+    "tavily_search", "tavily_extract",
+    "read_file", "terminal", "execute_code",
+    "browser_navigate", "browser_snapshot", "browser_click", "browser_type", "browser_back",
+    "search_files", "session_search", "memory_search", "memory_write", "memory",
+})
 _INCIDENT_DEDUPE_TTL_S = 300
 def _agent_emoji(agent_id: str) -> str:
     meta = _KNOWN_AGENT_META.get(agent_id)
@@ -2478,6 +2491,7 @@ def _state_row_to_event(row) -> dict:
         "content": row["content"] or "",
         "timestamp": ts_iso,
         "message_id": f"sqlite:{row['id']}",
+        "session_id": row["session_id"] or "",
         "tool_call_id": row["tool_call_id"] or "",
         "tool_calls": tool_calls,
         "tool_name": row["tool_name"],
@@ -2557,39 +2571,25 @@ _register_pattern(
 )
 
 def _tavily_search_builder(m, aid):
+    """Credit/trace only — feed rows come from structured session events."""
     query = m.group("query")
     _credit_external_tool("tavily", aid, "tavily_search", query, detail=f"Tavily search: {query}")
     _trace_add(aid, "tavily.search", query[:120])
-    return {
-        "type": "agent_event",
-        "agent": aid,
-        "ts": _now_hms(),
-        "kind": "tool_call",
-        "title": f"🔎 tavily.search · {query[:100]}",
-        "detail": query,
-        "full": f"## Tavily Search\n{query}",
-        "live": True,
-    }
+    _mark_feed_tool_emitted(aid, "tool_call", "web_search", query)
+    return None
 
 
 def _tavily_extract_builder(m, aid):
+    """Credit/trace only — feed rows come from structured session events."""
     url = m.group("url")
     _credit_external_tool("tavily", aid, "tavily_extract", url, detail=f"Tavily extract: {url}")
     _trace_add(aid, "tavily.extract", url[:120])
-    return {
-        "type": "agent_event",
-        "agent": aid,
-        "ts": _now_hms(),
-        "kind": "tool_call",
-        "title": f"🌐 tavily.extract · {url[:100]}",
-        "detail": url,
-        "full": f"## Tavily Extract\n{url}",
-        "live": True,
-    }
+    _mark_feed_tool_emitted(aid, "tool_call", "web_extract", url)
+    return None
 
 
-# Tool started — many tool prologues land in agent.log as
-#   "tools.<x>: <action>: '<query>'" or similar
+# Tavily prologues in agent.log duplicate structured tool_call rows from
+# state.db/jsonl — keep patterns for usage/trace side-effects only.
 _register_pattern(
     r"plugins\.web\.tavily\.provider:\s+Tavily search:\s+'(?P<query>.+?)'",
     _tavily_search_builder,
@@ -2600,17 +2600,25 @@ _register_pattern(
     _tavily_extract_builder,
 )
 
-# Tool completion in agent.log: latency + chars
-_register_pattern(
-    r"agent\.tool_executor:\s+tool\s+(?P<name>\S+)\s+completed\s+\((?P<dur>[\d.]+)s,\s+(?P<chars>\d+)\s+chars\)",
-    lambda m, aid: {
+
+def _tool_completed_builder(m, aid):
+    name = m.group("name")
+    if name in _STRUCTURED_LOG_TOOLS:
+        return None
+    return {
         "type": "agent_event",
         "agent": aid,
         "ts": _now_hms(),
         "kind": "tool_result",
-        "title": f"✓ {m.group('name')} ({m.group('dur')}s, {int(m.group('chars')):,} chars)",
+        "title": f"✓ {name} ({m.group('dur')}s, {int(m.group('chars')):,} chars)",
         "live": True,
-    },
+    }
+
+
+# Tool completion in agent.log: latency + chars (skipped for structured tools)
+_register_pattern(
+    r"agent\.tool_executor:\s+tool\s+(?P<name>\S+)\s+completed\s+\((?P<dur>[\d.]+)s,\s+(?P<chars>\d+)\s+chars\)",
+    _tool_completed_builder,
 )
 
 def _tool_returned_error_builder(m, aid):
@@ -2957,18 +2965,142 @@ def _parse_live_log_line(source: str, line: str) -> dict | None:
     return None
 
 
+def _trunc_feed(value: object, limit: int = 90) -> str:
+    s = str(value or "").replace("\n", " ").strip()
+    return s if len(s) <= limit else s[: limit - 1] + "…"
+
+
+def _feed_tool_dedupe_key(agent_id: str, kind: str, tool_name: str, detail: str) -> tuple:
+    return (agent_id, kind, tool_name, detail.strip().lower()[:160])
+
+
+def _prune_feed_tool_dedupe(now: float | None = None) -> None:
+    now = now or time.time()
+    stale = [k for k, ts in _feed_tool_dedupe.items() if now - ts > _FEED_TOOL_DEDUPE_TTL_S]
+    for k in stale:
+        _feed_tool_dedupe.pop(k, None)
+
+
+def _feed_tool_recently_emitted(agent_id: str, kind: str, tool_name: str, detail: str) -> bool:
+    if not detail:
+        return False
+    now = time.time()
+    _prune_feed_tool_dedupe(now)
+    key = _feed_tool_dedupe_key(agent_id, kind, tool_name, detail)
+    return now - _feed_tool_dedupe.get(key, 0) < _FEED_TOOL_DEDUPE_TTL_S
+
+
+def _mark_feed_tool_emitted(agent_id: str, kind: str, tool_name: str, detail: str) -> None:
+    if not detail:
+        return
+    now = time.time()
+    _prune_feed_tool_dedupe(now)
+    key = _feed_tool_dedupe_key(agent_id, kind, tool_name, detail)
+    _feed_tool_dedupe[key] = now
+
+
+def _tool_intent_detail(name: str, args: dict) -> str:
+    """Short human-readable intent string for a tool invocation."""
+    if name == "terminal":
+        cmd = args.get("command") or args.get("cmd") or ""
+        first = cmd.strip().splitlines()[0] if cmd else ""
+        if "memory.py" in first and " search " in first:
+            return _memory_search_label(first)[:160]
+        return _trunc_feed(first, 160)
+    if name in ("web_search", "search", "x_search", "tavily_search"):
+        return _trunc_feed(args.get("query") or args.get("q") or args.get("search") or "", 160)
+    if name in ("web_fetch", "url_fetch", "web_extract", "tavily_extract"):
+        return _trunc_feed(args.get("url") or args.get("href") or args.get("link") or "", 160)
+    if name in ("read_file", "edit_file", "edit", "str_replace_editor", "write_file", "write"):
+        return _trunc_feed(args.get("path") or args.get("file_path") or "", 160)
+    if name == "search_files":
+        pattern = args.get("pattern") or args.get("query") or ""
+        path = args.get("path") or ""
+        detail = _trunc_feed(pattern, 100)
+        if path:
+            detail = f"{detail} in {_trunc_feed(path, 60)}"
+        return detail
+    if name in ("session_search", "memory_search", "memory"):
+        return _trunc_feed(args.get("query") or args.get("q") or args.get("content") or "", 160)
+    if name == "browser_navigate":
+        return _trunc_feed(args.get("url") or "", 160)
+    if name == "execute_code":
+        code = args.get("code", "")
+        return _trunc_feed(code.strip().splitlines()[0] if code else "", 160)
+    if name == "vision":
+        return _trunc_feed(args.get("question") or args.get("prompt") or "", 160)
+    if name == "clarify":
+        return _trunc_feed(args.get("question") or args.get("prompt") or "", 160)
+    if name.startswith("kanban_"):
+        tid = args.get("task_id") or args.get("id") or ""
+        extra = args.get("summary") or args.get("body") or args.get("reason") or ""
+        bits = [b for b in (_trunc_feed(tid, 20), _trunc_feed(extra, 100)) if b]
+        return " · ".join(bits)
+    if name in ("skill_view", "skill_create"):
+        return _trunc_feed(args.get("name") or "", 160)
+    if name == "send_message":
+        ch = args.get("channel") or args.get("to") or ""
+        msg = args.get("text") or args.get("content") or args.get("message") or ""
+        return _trunc_feed(f"{ch}: {msg}" if ch else msg, 160)
+    if name == "image_generate":
+        return _trunc_feed(args.get("prompt") or "", 160)
+    if name == "todo":
+        todos = args.get("todos") or []
+        if isinstance(todos, list) and todos:
+            active = next((t for t in todos if isinstance(t, dict) and t.get("status") == "in_progress"), None)
+            label = (active.get("content") if active else todos[0].get("content")) if todos else ""
+            return _trunc_feed(label, 160)
+    preview = json.dumps(args, ensure_ascii=False)[:120]
+    return preview
+
+
+def _remember_tool_call(agent_id: str, call_id: str, name: str, args: dict) -> None:
+    if not call_id:
+        return
+    detail = _tool_intent_detail(name, args if isinstance(args, dict) else {})
+    if detail:
+        _tool_call_context[call_id] = {"name": name, "detail": detail, "agent": agent_id}
+
+
+def _pop_tool_call_context(call_id: str) -> dict | None:
+    if not call_id:
+        return None
+    return _tool_call_context.pop(call_id, None)
+
+
+def _credit_structured_tool_call(agent_id: str, name: str, args: dict, session_id: str = "") -> None:
+    if name in ("web_search", "search", "tavily_search"):
+        query = str(args.get("query") or args.get("q") or "")
+        if query:
+            _credit_external_tool(
+                "tavily", agent_id, "tavily_search", query,
+                session_id=session_id, detail=f"Tavily search: {query}",
+            )
+    elif name in ("web_fetch", "web_extract", "tavily_extract"):
+        url = str(args.get("url") or args.get("href") or args.get("link") or "")
+        if url:
+            _credit_external_tool(
+                "tavily", agent_id, "tavily_extract", url,
+                session_id=session_id, detail=f"Tavily extract: {url}",
+            )
+    elif name == "x_search":
+        query = str(args.get("query") or args.get("q") or args.get("search") or "")
+        if query:
+            _credit_external_tool(
+                "x", agent_id, "x_search", query,
+                session_id=session_id, detail=f"X search: {query}",
+            )
+
+
 def _tool_call_entry(name: str, args: dict, call_id: str = "") -> dict:
     """Build a feed entry for a generic tool call, pulling the most useful
     field out of `args` so the title reads like the agent's intent, not a
     JSON blob.
 
-    Returns: {kind, title, full} dict.
+    Returns: {kind, title, detail, tool, full} dict.
     """
     full = f"{name}\n\n{json.dumps(args, indent=2, ensure_ascii=False)}"
-
-    def _trunc(v: object, n: int = 90) -> str:
-        s = str(v or "").replace("\n", " ")
-        return s if len(s) <= n else s[: n - 1] + "…"
+    detail = _tool_intent_detail(name, args)
 
     # Map common Hermes tool names to a (icon, summary-extractor) pair.
     # The extractor returns a short human-readable description.
@@ -2976,76 +3108,68 @@ def _tool_call_entry(name: str, args: dict, call_id: str = "") -> dict:
         cmd = args.get("command") or args.get("cmd") or ""
         first = cmd.strip().splitlines()[0] if cmd else ""
         if "memory.py" in first and " search " in first:
-            label = _memory_search_label(first)
-            title = f"🧠 memory.search · {label[:100]}"
+            title = f"🧠 memory.search · {detail[:100]}"
         else:
-            title = f"💻 terminal · {_trunc(first, 120)}"
+            title = f"💻 terminal · {detail[:120]}"
     elif name == "execute_code":
         code = args.get("code", "")
         lines = code.count("\n") + (1 if code else 0)
-        first = code.strip().splitlines()[0] if code else ""
-        title = f"🐍 execute_code ({lines}L) · {_trunc(first, 80)}"
+        title = f"🐍 execute_code ({lines}L) · {detail[:80]}"
     elif name == "read_file":
-        p = args.get("path") or args.get("file_path") or ""
-        title = f"📖 read · {_trunc(p, 100)}"
+        title = f"📖 read · {detail[:100]}"
     elif name in ("edit_file", "edit", "str_replace_editor"):
-        p = args.get("path") or args.get("file_path") or ""
-        title = f"✏️ edit · {_trunc(p, 100)}"
+        title = f"✏️ edit · {detail[:100]}"
     elif name in ("web_search", "search"):
-        q = args.get("query") or args.get("q") or ""
-        title = f"🔎 tavily.search · {_trunc(q, 100)}"
+        title = f"🔎 tavily.search · {detail[:100]}"
     elif name in ("web_fetch", "url_fetch", "web_extract"):
-        u = args.get("url") or args.get("href") or ""
-        title = f"🌐 tavily.extract · {_trunc(u, 100)}"
+        title = f"🌐 tavily.extract · {detail[:100]}"
     elif name == "x_search":
-        q = args.get("query") or args.get("q") or args.get("search") or ""
-        title = f"𝕏 x.search · {_trunc(q, 100)}"
+        title = f"𝕏 x.search · {detail[:100]}"
         full = "x_search\n\n" + json.dumps({
-            "query": q,
+            "query": detail,
             "parameters": args,
             "note": "Click result rows or Tool Activity for result previews when available.",
         }, indent=2, ensure_ascii=False)
     elif name == "browser_navigate":
-        u = args.get("url") or ""
-        title = f"🌐 browser → {_trunc(u, 100)}"
+        title = f"🌐 browser → {detail[:100]}"
     elif name in ("browser_snapshot", "browser_click", "browser_type", "browser_back"):
-        title = f"🌐 {name}"
+        title = f"🌐 {name}" + (f" · {detail[:80]}" if detail else "")
     elif name == "vision":
-        q = args.get("question") or args.get("prompt") or ""
-        title = f"👁️ vision · {_trunc(q, 100)}"
+        title = f"👁️ vision · {detail[:100]}"
     elif name == "clarify":
-        q = args.get("question") or args.get("prompt") or ""
-        title = f"❓ clarify · {_trunc(q, 100)}"
-    elif name in ("memory", "memory_search", "memory_write"):
-        q = args.get("query") or args.get("content") or args.get("text") or ""
+        title = f"❓ clarify · {detail[:100]}"
+    elif name == "search_files":
+        title = f"🔎 search_files · {detail[:100]}"
+    elif name in ("session_search", "memory_search"):
+        title = f"🔍 recall · {detail[:100]}"
+    elif name in ("memory", "memory_write"):
         op = "search" if "search" in name or args.get("query") else ("write" if "write" in name or args.get("content") else "memory")
-        title = f"🧠 memory.{op} · {_trunc(q, 100)}"
+        title = f"🧠 memory.{op} · {detail[:100]}"
     elif name == "todo":
-        todos = args.get("todos") or []
-        if isinstance(todos, list) and todos:
-            active = next((t for t in todos if isinstance(t, dict) and t.get("status") == "in_progress"), None)
-            label = (active.get("content") if active else todos[0].get("content")) if todos else ""
-            title = f"📋 todo · {_trunc(label, 100)}"
-        else:
-            title = "📋 todo"
+        title = f"📋 todo · {detail[:100]}" if detail else "📋 todo"
     elif name.startswith("kanban_"):
         op = name.replace("kanban_", "")
-        tid = args.get("task_id") or args.get("id") or ""
-        extra = args.get("summary") or args.get("body") or args.get("reason") or ""
-        title = f"📋 kanban.{op}" + (f" · {_trunc(tid, 14)}" if tid else "") + (f" · {_trunc(extra, 80)}" if extra else "")
+        title = f"📋 kanban.{op}" + (f" · {detail[:100]}" if detail else "")
     elif name == "skill_view":
         title = f"📘 skill_view · {args.get('name', '')}"
     elif name == "skill_create":
         title = f"📘 skill_create · {args.get('name', '')}"
     elif name == "send_message":
-        ch = args.get("channel") or args.get("to") or ""
-        msg = args.get("text") or args.get("content") or args.get("message") or ""
-        title = f"💬 send_message → {_trunc(ch, 30)} · {_trunc(msg, 80)}"
+        title = f"💬 send_message · {detail[:100]}"
+    elif name == "image_generate":
+        title = f"🎨 image_generate · {detail[:80]}"
     else:
         preview = json.dumps(args, ensure_ascii=False)[:90]
         title = f"🔧 {name} {preview}"
 
-    return {"kind": "tool_call", "title": title, "full": full, "call_id": call_id}
+    return {
+        "kind": "tool_call",
+        "title": title,
+        "detail": detail,
+        "tool": name,
+        "full": full,
+        "call_id": call_id,
+    }
 
 
 def parse_hermes_event(ev: dict) -> list[dict]:
@@ -3128,6 +3252,8 @@ def parse_hermes_event(ev: dict) -> list[dict]:
                 entries.append({
                     "kind": "tool_call",
                     "title": f"🎨 image_generate · {str(prompt)[:80]}",
+                    "detail": str(prompt)[:160],
+                    "tool": name,
                     "full": json.dumps(args, indent=2, ensure_ascii=False),
                     "call_id": call_id,
                 })
@@ -3139,6 +3265,8 @@ def parse_hermes_event(ev: dict) -> list[dict]:
         name = ev.get("tool_name") or ev.get("name", "tool")
         content = str(ev.get("content", "") or "")
         call_id = str(ev.get("tool_call_id") or ev.get("id") or "")
+        ctx = _pop_tool_call_context(call_id)
+        intent = (ctx or {}).get("detail") or ""
         is_error = False
         # Hermes tool results are typically a JSON string; sniff for errors.
         try:
@@ -3151,25 +3279,27 @@ def parse_hermes_event(ev: dict) -> list[dict]:
         if is_error:
             entries.append({
                 "kind": "tool_error",
-                "title": name,
-                "detail": content[:150],
+                "title": f"{name}" + (f" · {intent[:90]}" if intent else ""),
+                "detail": intent or content[:150],
                 "full": content,
                 "call_id": call_id,
             })
         else:
             title = f"{name} result"
+            if intent:
+                title = f"{name} · {intent[:90]}"
             try:
                 parsed = json.loads(content) if content.startswith("{") else None
                 if isinstance(parsed, dict):
                     output = parsed.get("output") or parsed.get("result") or parsed.get("content")
-                    if output:
+                    if output and not intent:
                         title = f"{name} result · {str(output).replace(chr(10), ' ')[:90]}"
             except Exception:
                 pass
             entries.append({
                 "kind": "tool_result",
                 "title": title,
-                "detail": content[:150],
+                "detail": intent or content[:150],
                 "full": content,
                 "call_id": call_id,
             })
@@ -3205,6 +3335,7 @@ class Watcher(threading.Thread):
         pinned (so we don't re-process them when polling), but no events
         from yesterday end up cluttering the feed.
         """
+        self._warming_up = True
         WARMUP_TAIL = 50            # last N events per agent to seed
         WARMUP_FRESHNESS_SECONDS = int(
             os.environ.get("HERMES_WEBUI_WARMUP_FRESHNESS", "21600")
@@ -3289,6 +3420,7 @@ class Watcher(threading.Thread):
 
         # Pre-populate file registry without broadcasting (recent files only)
         self._scan_delivery_files(broadcast_event=False)
+        self._warming_up = False
 
     def run(self):
         heartbeat_ts = time.time()
@@ -3471,14 +3603,21 @@ class Watcher(threading.Thread):
             return
         seen_events.add(key)
 
-        # Derive a short "session" tag from the current session file basename.
-        cursor = self.session_cursors.get(agent_id)
-        session_short = None
-        if cursor and cursor[0]:
-            base = os.path.basename(cursor[0])
-            # 20260521_184521_0e5fb3f5.jsonl → 0e5fb3f5
-            stem = os.path.splitext(base)[0]
-            session_short = stem.split("_")[-1][:8] if "_" in stem else stem[:8]
+        # Derive a short "session" tag. Prefer explicit session_id on the event
+        # (set by state.db rows) so kanban/cron sessions show their real ID
+        # instead of the cursor's stale jsonl filename.
+        ev_session_id = ev.get("session_id") or ""
+        if ev_session_id:
+            sid = ev_session_id
+            session_short = sid.split("_")[-1][:8] if "_" in sid else sid[:8]
+        else:
+            cursor = self.session_cursors.get(agent_id)
+            session_short = None
+            if cursor and cursor[0]:
+                base = os.path.basename(cursor[0])
+                # 20260521_184521_0e5fb3f5.jsonl → 0e5fb3f5
+                stem = os.path.splitext(base)[0]
+                session_short = stem.split("_")[-1][:8] if "_" in stem else stem[:8]
 
         # Update agent state and broadcast
         agent_state[agent_id]["last_seen"] = ts_short
@@ -3508,14 +3647,35 @@ class Watcher(threading.Thread):
             except (json.JSONDecodeError, TypeError):
                 pass
 
+        if role == "assistant":
+            for tc in ev.get("tool_calls") or []:
+                if not isinstance(tc, dict):
+                    continue
+                fn = tc.get("function") or {}
+                call_id = str(tc.get("id") or tc.get("tool_call_id") or "")
+                name = fn.get("name", "tool")
+                raw_args = fn.get("arguments", "")
+                try:
+                    args = json.loads(raw_args) if isinstance(raw_args, str) else (raw_args or {})
+                except Exception:
+                    args = {}
+                _remember_tool_call(agent_id, call_id, name, args)
+                _credit_structured_tool_call(agent_id, name, args, ev_session_id)
+
         for parsed in parse_hermes_event(ev):
+            kind = parsed.get("kind")
+            tool = parsed.get("tool") or ""
+            detail = (parsed.get("detail") or "").strip()
+            if kind == "tool_call" and detail and _feed_tool_recently_emitted(agent_id, kind, tool, detail):
+                continue
+            if kind == "tool_call" and detail:
+                _mark_feed_tool_emitted(agent_id, kind, tool, detail)
             broadcast({
                 "type": "agent_event",
                 "agent": agent_id,
                 "ts": ts_short,
                 **parsed,
             })
-            kind = parsed.get("kind")
             if kind == "tool_call":
                 title = parsed.get("title", "")
                 trace_kind = "tool.call"
@@ -3535,7 +3695,8 @@ class Watcher(threading.Thread):
                 if fpath:
                     _try_register_path(fpath, broadcast_event=True)
             # Trace mirror: milestones mode keeps tool_call quiet; incidents always post.
-            if kind == "tool_error":
+            # Skip during warmup replay — these are historical events, not live incidents.
+            if kind == "tool_error" and not getattr(self, "_warming_up", False):
                 title = parsed.get("title", "?")
                 detail = (parsed.get("detail") or "")[:120]
                 trace_incident(
@@ -3996,7 +4157,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     tables = [r[0] for r in conn.execute(
                         "SELECT name FROM sqlite_master WHERE type='table'"
                     ).fetchall()]
-                    tbl = next((t for t in tables if 'cron' in t.lower() or 'job' in t.lower()), None)
+                    # Prefer a table whose name contains 'cron' or 'job',
+                    # but fall back to the first available table so we
+                    # never return empty when the schema uses another name.
+                    tbl = next(
+                        (t for t in tables if 'cron' in t.lower() or 'job' in t.lower()),
+                        tables[0] if tables else None,
+                    )
                     if not tbl:
                         conn.close()
                         return []
