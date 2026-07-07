@@ -324,6 +324,8 @@
     <button class="stab"             data-tab="backup"      onclick="switchSettingsTab('backup')">Backup</button>
     <button class="stab"             data-tab="data"        onclick="switchSettingsTab('data')">Data</button>
     <button class="stab"             data-tab="panels"      onclick="switchSettingsTab('panels')">Panels</button>
+    <button class="stab"             data-tab="performance" onclick="switchSettingsTab('performance')">Performance</button>
+    <button class="stab"             data-tab="debug"       onclick="switchSettingsTab('debug')">Debug</button>
   </div>
 
   <!-- ── Connection tab ── -->
@@ -487,9 +489,89 @@
       <label class="sw"><input id="panel-cron" type="checkbox" onchange="applyPanelVisibility()"><span class="sw-slider"></span></label>
     </div>
   </div>
+
+  <!-- ── Performance tab ── -->
+  <div class="stab-body" id="stab-performance" style="display:none">
+    <div class="sfield-section-lbl">Polling</div>
+    <div class="sfield">
+      <div class="sfield-label">Poll preset</div>
+      <div class="sfield-hint">Normal is the default balance. Eco slows all background polls. Manual exposes custom intervals.</div>
+      <select id="pref-poll-preset" class="sfield-input" onchange="onPollPresetChange()">
+        <option value="normal">Normal</option>
+        <option value="eco">Eco (2.5× slower)</option>
+        <option value="manual">Manual</option>
+      </select>
+    </div>
+    <div class="stoggle-row">
+      <span>Pause polls when tab hidden</span>
+      <label class="sw"><input id="pref-pause-hidden" type="checkbox"><span class="sw-slider"></span></label>
+    </div>
+    <div class="stoggle-row">
+      <span>Pause polls while dragging panels</span>
+      <label class="sw"><input id="pref-pause-dragging" type="checkbox"><span class="sw-slider"></span></label>
+    </div>
+    <div class="stoggle-row">
+      <span>Slow polls when SSE connected</span>
+      <label class="sw"><input id="pref-sse-backoff" type="checkbox"><span class="sw-slider"></span></label>
+    </div>
+    <div id="pref-manual-fields" style="display:none">
+      <div class="sfield">
+        <div class="sfield-label">Manual poll multiplier</div>
+        <input id="pref-manual-multiplier" type="number" class="sfield-input" min="0.25" max="10" step="0.25" value="1">
+      </div>
+      <div class="sfield">
+        <div class="sfield-label">Activity poll interval (seconds)</div>
+        <input id="pref-activity-poll-sec" type="number" class="sfield-input" min="5" max="120" value="10">
+      </div>
+    </div>
+    <div class="sfield-section-lbl" style="margin-top:20px">Kanban drawer</div>
+    <div class="stoggle-row">
+      <span>Auto-refresh open card drawer</span>
+      <label class="sw"><input id="pref-drawer-refresh" type="checkbox"><span class="sw-slider"></span></label>
+    </div>
+    <div class="sfield">
+      <div class="sfield-label">Drawer refresh interval (seconds)</div>
+      <input id="pref-drawer-poll-sec" type="number" class="sfield-input" min="3" max="60" value="10">
+    </div>
+    <div class="sfield-actions">
+      <button class="sbtn sbtn-primary" onclick="applyPerformancePrefs()">Save Performance</button>
+      <div class="sfield-status" id="status-performance"></div>
+    </div>
+  </div>
+
+  <!-- ── Debug tab ── -->
+  <div class="stab-body" id="stab-debug" style="display:none">
+    <div class="sfield-section-lbl">Client trace</div>
+    <div class="stoggle-row">
+      <span>Log polls and fetch timing in browser</span>
+      <label class="sw"><input id="pref-client-debug" type="checkbox"><span class="sw-slider"></span></label>
+    </div>
+    <div class="sfield">
+      <div class="sfield-label">Client debug log</div>
+      <pre id="debug-client-log" class="debug-log-view" style="max-height:160px;overflow:auto;font-size:11px"></pre>
+      <button class="sbtn" type="button" onclick="clearClientDebugLogView()">Clear client log</button>
+    </div>
+    <div class="sfield-section-lbl" style="margin-top:20px">Server console</div>
+    <div class="stoggle-row">
+      <span>Tail server console.log</span>
+      <label class="sw"><input id="pref-server-debug-log" type="checkbox"><span class="sw-slider"></span></label>
+    </div>
+    <div class="sfield">
+      <div class="sfield-label">console.log (last 200 lines)</div>
+      <pre id="debug-server-log" class="debug-log-view" style="max-height:240px;overflow:auto;font-size:11px">Enable tail above to load…</pre>
+      <button class="sbtn" type="button" onclick="refreshServerDebugLog()">Refresh now</button>
+    </div>
+    <div class="sfield-actions">
+      <button class="sbtn sbtn-primary" onclick="applyDebugPrefs()">Save Debug</button>
+      <div class="sfield-status" id="status-debug"></div>
+    </div>
+  </div>
 </div>
 
 <script src="/static/marked.min.js"></script>
-<script src="/static/app.js"></script>
+<!-- Legacy monolith — kept as a fallback reference only. Remove once the
+     module build is validated in production. -->
+<!-- <script src="/static/app.js"></script> -->
+<script type="module" src="/static/js/main.js"></script>
 </body>
 </html>

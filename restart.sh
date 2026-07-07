@@ -7,13 +7,15 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 
 quiet=0
 [[ "${1:-}" == "--quiet" ]] && quiet=1
 
 "$SCRIPT_DIR/stop.sh" || true
 
-args=()
-(( quiet )) && args+=(--quiet)
-exec "$SCRIPT_DIR/start.sh" "${args[@]}"
+if (( quiet )); then
+    exec "$SCRIPT_DIR/start.sh" --quiet
+else
+    exec "$SCRIPT_DIR/start.sh"
+fi
